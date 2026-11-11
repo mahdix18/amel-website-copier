@@ -215,6 +215,8 @@ pub enum CrawlError {
     },
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error("could not prepare the requester: {0}")]
+    Requester(FetchError),
 }
 
 pub struct Crawler {
@@ -273,6 +275,10 @@ impl Crawler {
         };
         self.restore(&mut state, &seeds)?;
         state.set_status(CrawlStatus::Running)?;
+        self.requester
+            .prepare()
+            .await
+            .map_err(CrawlError::Requester)?;
 
         self.crawl(&mut state, &policy, started).await;
         if let Some(error) = state.store_error.take() {

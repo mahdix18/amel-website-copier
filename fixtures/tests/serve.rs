@@ -71,6 +71,6 @@ fn site_names_round_trip() {
     let err = "nope".parse::<Site>().unwrap_err();
     assert_eq!(
         err.to_string(),
-        "unknown fixture site `nope` (available: static-blog, ua-gate, hostile, spa)"
+        "unknown fixture site `nope` (available: static-blog, ua-gate, hostile, spa, auth)"
     );
 }

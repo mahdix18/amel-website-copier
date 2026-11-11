@@ -286,15 +286,15 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
 **Progress (2026-11-11):**
 
 - **M0–M2 done.**
-- **M3 partly done.** Done so far:
+- **M3 done:**
   - the Playwright requester, behind the `browser` feature, using an already installed Chromium when there is one
   - network capture and auto-scroll
   - the `auto` hybrid, which also falls back to the browser on a 403
+  - scripted login (`--login-script`, run before the first request) and interactive login (`mistercopy login`, saved as `cookies.txt`)
+  - logout links skipped by default
   - `browsers status|install`
-  - the `spa` fixture (vanilla JavaScript rather than React)
-- **Still open in M3:**
-  - scripted and interactive login, with the `auth` fixture
-  - choosing a requester per rule (one requester per crawl for now)
+  - the `spa` fixture (vanilla JavaScript rather than React) and the `auth` fixture
+- **Deferred from M3:** choosing a requester per rule (one requester per crawl for now).
 
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.

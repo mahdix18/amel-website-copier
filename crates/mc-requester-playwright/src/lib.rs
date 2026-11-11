@@ -62,6 +62,8 @@ pub struct PlaywrightConfig {
     /// Pages rendering at once. Each one costs a renderer process.
     pub pages: usize,
     pub headless: bool,
+    /// Steps run once before the crawl, to log in. See [`LoginStep`].
+    pub login: Vec<LoginStep>,
 }
 
 impl Default for PlaywrightConfig {
@@ -73,6 +75,7 @@ impl Default for PlaywrightConfig {
             keep_scripts: false,
             pages: 2,
             headless: true,
+            login: Vec::new(),
         }
     }
 }
@@ -113,6 +116,9 @@ impl RequesterFactory for PlaywrightFactory {
             && !path.is_file()
         {
             return Err(build_error(format!("no browser at {}", path.display())));
+        }
+        for step in &config.login {
+            step.action().map_err(build_error)?;
         }
         Ok(Arc::new(PlaywrightRequester::new(config, shared)))
     }
@@ -427,23 +433,232 @@ impl PlaywrightRequester {
         }
     }
 
-    /// Copies cookies the page set back into the shared session, so other
-    /// requesters stay logged in too.
-    async fn cookies_out(&self, session: &Session, url: &Url) {
-        let Ok(cookies) = session.context.cookies(Some(&[url.as_str()])).await else {
+    /// Copies the browser's cookies (those for `url`, or all of them) into
+    /// the shared session, so other requesters stay logged in too.
+    async fn cookies_out(&self, session: &Session, url: Option<&Url>) {
+        let filter = url.map(|url| [url.as_str()]);
+        let Ok(cookies) = session
+            .context
+            .cookies(filter.as_ref().map(|f| &f[..]))
+            .await
+        else {
             return;
         };
         for cookie in cookies {
-            let mut line = format!("{}={}; Path={}", cookie.name, cookie.value, cookie.path);
-            if !cookie.domain.is_empty() && cookie.domain.starts_with('.') {
-                line.push_str(&format!("; Domain={}", cookie.domain));
+            if let Some((origin, line)) = set_cookie_line(&cookie) {
+                self.cookies.store_line(&origin, &line);
             }
-            if cookie.secure {
-                line.push_str("; Secure");
-            }
-            self.cookies.store_line(url, &line);
         }
     }
+
+    /// Runs the configured login steps in a page of the shared context.
+    async fn log_in(&self, session: &Session) -> Result<(), FetchError> {
+        let page = session.context.new_page().await.map_err(other)?;
+        let mut outcome = Ok(());
+        for (index, step) in self.config.login.iter().enumerate() {
+            let result = match step.action() {
+                Ok(LoginAction::Goto(url)) => {
+                    let options = GotoOptions::new()
+                        .timeout(self.timeout)
+                        .wait_until(WaitUntil::Load);
+                    page.goto(url, options).await.map(drop)
+                }
+                Ok(LoginAction::Fill(selector, value)) => {
+                    page.locator(selector).fill(&value, None).await
+                }
+                Ok(LoginAction::Click(selector)) => {
+                    let clicked = page.locator(selector).click(None).await;
+                    // A submit usually navigates; let it land.
+                    let _ = page.wait_for_load_state(Some(WaitUntil::Load)).await;
+                    clicked
+                }
+                Ok(LoginAction::WaitFor(selector)) => page.locator(selector).wait_for(None).await,
+                Err(message) => {
+                    outcome = Err(FetchError::Other(message.into()));
+                    break;
+                }
+            };
+            if let Err(error) = result {
+                outcome = Err(FetchError::Other(
+                    format!("login step {}: {error}", index + 1).into(),
+                ));
+                break;
+            }
+        }
+        let _ = page.close().await;
+        outcome?;
+        self.cookies_out(session, None).await;
+        Ok(())
+    }
+}
+
+/// A browser cookie as a `Set-Cookie` line plus the origin that would have
+/// sent it, so the shared jar applies the same domain rules.
+fn set_cookie_line(cookie: &Cookie) -> Option<(Url, String)> {
+    let host = cookie.domain.trim_start_matches('.');
+    if host.is_empty() {
+        return None;
+    }
+    let scheme = if cookie.secure { "https" } else { "http" };
+    let path = if cookie.path.is_empty() {
+        "/"
+    } else {
+        &cookie.path
+    };
+    let origin = Url::parse(&format!("{scheme}://{host}{path}")).ok()?;
+    let mut line = format!("{}={}; Path={path}", cookie.name, cookie.value);
+    if cookie.domain.starts_with('.') {
+        line.push_str(&format!("; Domain={host}"));
+    }
+    if cookie.secure {
+        line.push_str("; Secure");
+    }
+    Some((origin, line))
+}
+
+/// One step of a scripted login, as written in a login script:
+/// `{"goto": URL}`, `{"fill": SELECTOR, "value": TEXT}` (or `"value_env":
+/// VAR` to read the text from the environment), `{"click": SELECTOR}`,
+/// `{"wait_for": SELECTOR}`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginStep {
+    #[serde(default)]
+    pub goto: Option<String>,
+    #[serde(default)]
+    pub fill: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub value_env: Option<String>,
+    #[serde(default)]
+    pub click: Option<String>,
+    #[serde(default)]
+    pub wait_for: Option<String>,
+}
+
+enum LoginAction<'a> {
+    Goto(&'a str),
+    Fill(&'a str, String),
+    Click(&'a str),
+    WaitFor(&'a str),
+}
+
+impl LoginStep {
+    fn action(&self) -> Result<LoginAction<'_>, String> {
+        let actions = [&self.goto, &self.fill, &self.click, &self.wait_for]
+            .iter()
+            .filter(|action| action.is_some())
+            .count();
+        if actions != 1 {
+            return Err(
+                "each login step needs exactly one of goto, fill, click, wait_for".to_owned(),
+            );
+        }
+        if let Some(url) = &self.goto {
+            return Ok(LoginAction::Goto(url));
+        }
+        if let Some(selector) = &self.click {
+            return Ok(LoginAction::Click(selector));
+        }
+        if let Some(selector) = &self.wait_for {
+            return Ok(LoginAction::WaitFor(selector));
+        }
+        let selector = self.fill.as_deref().unwrap_or_default();
+        let value = match (&self.value, &self.value_env) {
+            (Some(value), None) => value.clone(),
+            (None, Some(var)) => std::env::var(var)
+                .map_err(|_| format!("login step reads ${var}, which is not set"))?,
+            _ => {
+                return Err(format!(
+                    "fill `{selector}` needs exactly one of value, value_env"
+                ));
+            }
+        };
+        Ok(LoginAction::Fill(selector, value))
+    }
+}
+
+/// Opens a visible browser at `url` for the user to log in by hand, then
+/// saves the session's cookies to `save_to` in Netscape format, readable by
+/// `--cookies`. The file is created readable by its owner only.
+pub async fn interactive_login(
+    url: &Url,
+    executable: Option<PathBuf>,
+    save_to: &Path,
+) -> Result<usize, String> {
+    let playwright = Playwright::launch().await.map_err(|e| e.to_string())?;
+    let mut options = LaunchOptions::new().headless(false);
+    if let Some(path) = executable.or_else(|| installed_chromium().into_iter().next()) {
+        options = options.executable_path(path.to_string_lossy().into_owned());
+    }
+    let browser = playwright
+        .chromium()
+        .launch_with_options(options)
+        .await
+        .map_err(|e| format!("could not open Chromium: {e}"))?;
+    let context = browser.new_context().await.map_err(|e| e.to_string())?;
+    let page = context.new_page().await.map_err(|e| e.to_string())?;
+    page.goto(url.as_str(), None)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    println!("Log in in the browser window, then press Enter here.");
+    let mut line = String::new();
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    tokio::io::AsyncBufReadExt::read_line(&mut stdin, &mut line)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let cookies = context.cookies(None).await.map_err(|e| e.to_string())?;
+    let _ = browser.close().await;
+    write_cookie_file(save_to, &cookies)
+        .map_err(|e| format!("cannot write {}: {e}", save_to.display()))?;
+    Ok(cookies.len())
+}
+
+/// Cookies in the Netscape `cookies.txt` format.
+pub fn netscape_cookies(cookies: &[Cookie]) -> String {
+    let mut text = String::from(
+        "# Netscape HTTP Cookie File\n# Saved by MisterCopy. Contains a login session: keep it private.\n",
+    );
+    for cookie in cookies {
+        let bool_field = |flag: bool| if flag { "TRUE" } else { "FALSE" };
+        let domain = if cookie.http_only {
+            format!("#HttpOnly_{}", cookie.domain)
+        } else {
+            cookie.domain.clone()
+        };
+        let expires = if cookie.expires > 0.0 {
+            cookie.expires as i64
+        } else {
+            0
+        };
+        text.push_str(&format!(
+            "{domain}\t{}\t{}\t{}\t{expires}\t{}\t{}\n",
+            bool_field(cookie.domain.starts_with('.')),
+            if cookie.path.is_empty() {
+                "/"
+            } else {
+                &cookie.path
+            },
+            bool_field(cookie.secure),
+            cookie.name,
+            cookie.value,
+        ));
+    }
+    text
+}
+
+fn write_cookie_file(path: &Path, cookies: &[Cookie]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options
+        .open(path)?
+        .write_all(netscape_cookies(cookies).as_bytes())
 }
 
 #[async_trait]
@@ -473,9 +688,19 @@ impl Requester for PlaywrightRequester {
         let result = self.render(&page, &request).await;
         let _ = page.close().await;
         if let Ok(response) = &result {
-            self.cookies_out(session, &response.final_url).await;
+            self.cookies_out(session, Some(&response.final_url)).await;
         }
         result
+    }
+
+    /// Starts the browser and runs the login script, if there is one, so
+    /// the whole crawl (other requesters included) starts logged in.
+    async fn prepare(&self) -> Result<(), FetchError> {
+        if self.config.login.is_empty() {
+            return Ok(());
+        }
+        let session = self.session().await?;
+        self.log_in(session).await
     }
 }
 
@@ -510,5 +735,88 @@ fn navigation_error(error: playwright_rs::Error) -> FetchError {
         FetchError::Connect(message)
     } else {
         FetchError::Other(message.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn step(json: serde_json::Value) -> LoginStep {
+        serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn validates_login_steps() {
+        assert!(matches!(
+            step(serde_json::json!({"goto": "https://s.test/login"})).action(),
+            Ok(LoginAction::Goto(_))
+        ));
+        assert!(matches!(
+            step(serde_json::json!({"fill": "#user", "value": "ann"})).action(),
+            Ok(LoginAction::Fill("#user", value)) if value == "ann"
+        ));
+        assert!(step(serde_json::json!({"fill": "#user"})).action().is_err());
+        assert!(
+            step(serde_json::json!({"click": "a", "goto": "b"}))
+                .action()
+                .is_err()
+        );
+        assert!(step(serde_json::json!({})).action().is_err());
+        assert!(serde_json::from_value::<LoginStep>(serde_json::json!({"tap": "x"})).is_err());
+        let missing =
+            step(serde_json::json!({"fill": "#p", "value_env": "MISTERCOPY_SURELY_UNSET_VAR"}));
+        assert!(
+            missing
+                .action()
+                .err()
+                .unwrap()
+                .contains("MISTERCOPY_SURELY_UNSET_VAR")
+        );
+    }
+
+    #[test]
+    fn writes_netscape_cookies() {
+        let mut session = Cookie::new("session", "abc");
+        session.domain = "site.test".to_owned();
+        session.path = "/".to_owned();
+        session.http_only = true;
+        session.expires = -1.0;
+        let mut wide = Cookie::new("theme", "dark");
+        wide.domain = ".site.test".to_owned();
+        wide.path = "/docs".to_owned();
+        wide.secure = true;
+        wide.expires = 4_102_444_800.0;
+
+        let text = netscape_cookies(&[session, wide]);
+        assert!(
+            text.contains("#HttpOnly_site.test\tFALSE\t/\tFALSE\t0\tsession\tabc\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(".site.test\tTRUE\t/docs\tTRUE\t4102444800\ttheme\tdark\n"),
+            "{text}"
+        );
+
+        // What we write, the jar reads back.
+        let jar = CookieJar::new();
+        assert_eq!(jar.import_netscape(&text).unwrap(), 2);
+    }
+
+    #[test]
+    fn converts_browser_cookies_for_the_jar() {
+        let mut cookie = Cookie::new("sid", "1");
+        cookie.domain = ".site.test".to_owned();
+        cookie.path = "/".to_owned();
+        let (origin, line) = set_cookie_line(&cookie).unwrap();
+        assert_eq!(origin.as_str(), "http://site.test/");
+        assert_eq!(line, "sid=1; Path=/; Domain=site.test");
+        let jar = CookieJar::new();
+        jar.store_line(&origin, &line);
+        assert_eq!(
+            jar.header_for(&Url::parse("http://www.site.test/").unwrap())
+                .as_deref(),
+            Some("sid=1")
+        );
     }
 }

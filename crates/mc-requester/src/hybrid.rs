@@ -53,6 +53,11 @@ impl Requester for HybridRequester {
         }
     }
 
+    async fn prepare(&self) -> Result<(), FetchError> {
+        self.fast.prepare().await?;
+        self.browser.prepare().await
+    }
+
     async fn shutdown(&self) {
         self.fast.shutdown().await;
         self.browser.shutdown().await;

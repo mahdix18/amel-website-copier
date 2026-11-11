@@ -2,7 +2,7 @@
 
 A lightweight website copier for offline browsing, written in Rust. See [PLAN.md](PLAN.md) for the design and milestones.
 
-**Status:** M3, partly done. MisterCopy copies sites through a browser-impersonating HTTP client and rewrites their links to work offline. It retries transient failures, respects robots.txt, can stop and resume, updates a copy by downloading only what changed, and writes a report. With the `browser` feature it can also render JavaScript-built pages in Chromium. Logging in through the browser (scripted or interactive) is the M3 work still to do.
+**Status:** M3. MisterCopy copies sites through a browser-impersonating HTTP client and rewrites their links to work offline. It retries transient failures, respects robots.txt, can stop and resume, updates a copy by downloading only what changed, and writes a report. With the `browser` feature it also renders JavaScript-built pages in Chromium and can log in through a real browser. The native GUI (M4) is next.
 
 ## Usage
 
@@ -72,9 +72,32 @@ Options that carry credentials are never saved, so pass them again to `resume` a
 |---|---|
 | `--auth HOST=USER:PASSWORD` | HTTP Basic login for one host. `--auth HOST=USER` reads the password from `$MISTERCOPY_PASSWORD`, which keeps it out of your shell history |
 | `--header "Name: value"` | Extra header, sent only to the site's own hosts |
-| `--cookies cookies.txt` | Start with the cookies from a Netscape-format file, as exported by browser extensions |
+| `--cookies cookies.txt` | Start with the cookies from a Netscape-format file, as exported by browser extensions or by `mistercopy login` |
+| `--login-script login.json` | Log in through Chromium before the crawl (needs `--requester playwright` or `auto`) |
 
-Credentials are dropped when a redirect leaves the origin.
+Credentials are dropped when a redirect leaves the origin. Links that look like logout (`/logout`, `/sign-out`, `?action=logout`…) are never followed unless an `--include` rule names them, so a crawl doesn't end its own session.
+
+A login script is a JSON list of steps, each with exactly one action. Use `value_env` to keep the password out of the file:
+
+```json
+[
+  { "goto": "https://example.com/login" },
+  { "fill": "#username", "value": "ann" },
+  { "fill": "#password", "value_env": "MISTERCOPY_PASSWORD" },
+  { "click": "button[type=submit]" },
+  { "wait_for": ".account-menu" }
+]
+```
+
+The browser logs in once before the first request. With `--requester auto`, plain pages are then fetched over HTTP using the same session.
+
+To log in by hand instead (for example past two-factor prompts), open a browser window and save the session:
+
+```bash
+mistercopy login https://example.com/login --save cookies.txt
+```
+
+Then pass `--cookies cookies.txt`. The file holds a live session and is created readable only by you.
 
 Exit codes:
 

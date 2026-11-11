@@ -4,6 +4,7 @@
 //! problem. More sites (`spa-react`, `auth`) arrive with the milestones that
 //! need them.
 
+pub mod auth;
 mod hostile;
 
 use std::fmt;
@@ -40,10 +41,19 @@ pub enum Site {
     /// A JavaScript single-page app: client-side routes, content fetched
     /// from `/api`, and images that load only when scrolled into view.
     Spa,
+    /// Form login with a CSRF token, a members area behind a session cookie,
+    /// a logout trap, and an HTTP Basic area.
+    Auth,
 }
 
 impl Site {
-    pub const ALL: &[Site] = &[Site::StaticBlog, Site::UaGate, Site::Hostile, Site::Spa];
+    pub const ALL: &[Site] = &[
+        Site::StaticBlog,
+        Site::UaGate,
+        Site::Hostile,
+        Site::Spa,
+        Site::Auth,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -51,6 +61,7 @@ impl Site {
             Site::UaGate => "ua-gate",
             Site::Hostile => "hostile",
             Site::Spa => "spa",
+            Site::Auth => "auth",
         }
     }
 
@@ -105,6 +116,7 @@ pub fn router(site: Site) -> Router {
             .fallback_service(files)
             .layer(middleware::from_fn(require_browser)),
         Site::Hostile => hostile::router(),
+        Site::Auth => auth::router(),
         // Unknown paths are client-side routes: serve the app shell.
         Site::Spa => Router::new().fallback_service(
             ServeDir::new(site.root()).fallback(ServeFile::new(site.root().join("index.html"))),

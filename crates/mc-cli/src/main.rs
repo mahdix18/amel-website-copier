@@ -42,6 +42,20 @@ enum Command {
         #[command(subcommand)]
         command: BrowsersCommand,
     },
+    /// Log in by hand in a browser window and save the session for `--cookies`.
+    Login(LoginArgs),
+}
+
+#[derive(clap::Args)]
+struct LoginArgs {
+    /// The site's login page.
+    url: mc_requester::Url,
+    /// Where to save the session cookies (readable only by you).
+    #[arg(long, default_value = "cookies.txt")]
+    save: std::path::PathBuf,
+    /// Chromium to open; defaults to the newest one Playwright installed.
+    #[arg(long, value_name = "PATH")]
+    browser_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -98,8 +112,37 @@ async fn browsers(command: BrowsersCommand) -> ExitCode {
     }
 }
 
+#[cfg(feature = "browser")]
+async fn login(args: LoginArgs) -> ExitCode {
+    match mc_requester_playwright::interactive_login(&args.url, args.browser_path, &args.save).await
+    {
+        Ok(count) => {
+            println!(
+                "Saved {count} cookies to {}. Pass `--cookies {}` to copy as this user; the file holds a live session, so keep it private.",
+                args.save.display(),
+                args.save.display()
+            );
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 #[cfg(not(feature = "browser"))]
 async fn browsers(_: BrowsersCommand) -> ExitCode {
+    no_browser_support()
+}
+
+#[cfg(not(feature = "browser"))]
+async fn login(_: LoginArgs) -> ExitCode {
+    no_browser_support()
+}
+
+#[cfg(not(feature = "browser"))]
+fn no_browser_support() -> ExitCode {
     eprintln!("error: this build has no browser support; rebuild with `--features browser`");
     ExitCode::from(2)
 }
@@ -116,6 +159,7 @@ async fn main() -> ExitCode {
             command: RequestersCommand::List { json },
         } => list_requesters(&registry().list(), json),
         Command::Browsers { command } => browsers(command).await,
+        Command::Login(args) => login(args).await,
     }
 }
 

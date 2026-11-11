@@ -33,6 +33,12 @@ pub trait Requester: Send + Sync + 'static {
         context: &FetchContext,
     ) -> Result<FetchResponse, FetchError>;
 
+    /// Runs once before the crawl's first request, for setup such as
+    /// logging in. Failing here stops the crawl before it starts.
+    async fn prepare(&self) -> Result<(), FetchError> {
+        Ok(())
+    }
+
     /// Releases pooled connections or browser processes.
     async fn shutdown(&self) {}
 }

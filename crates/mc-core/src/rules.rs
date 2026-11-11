@@ -61,15 +61,18 @@ pub enum SkipReason {
     UrlLimit,
     /// Disallowed by the site's robots.txt.
     Robots,
+    /// Looks like a logout link, which would end the session.
+    Logout,
 }
 
 impl SkipReason {
-    pub const ALL: [SkipReason; 5] = [
+    pub const ALL: [SkipReason; 6] = [
         Self::Excluded,
         Self::OutOfScope,
         Self::TooDeep,
         Self::UrlLimit,
         Self::Robots,
+        Self::Logout,
     ];
 
     /// A stable name for storage and reports.
@@ -80,6 +83,7 @@ impl SkipReason {
             Self::TooDeep => "too-deep",
             Self::UrlLimit => "url-limit",
             Self::Robots => "robots",
+            Self::Logout => "logout",
         }
     }
 
@@ -96,6 +100,7 @@ impl std::fmt::Display for SkipReason {
             Self::TooDeep => "deeper than the depth limit",
             Self::UrlLimit => "URL limit reached",
             Self::Robots => "disallowed by robots.txt",
+            Self::Logout => "looks like a logout link",
         })
     }
 }
@@ -119,6 +124,10 @@ impl Policy {
             .find(|rule| rule.pattern.is_match(url.as_str()));
         if rule.is_some_and(|r| r.action == RuleAction::Exclude) {
             return Decision::Skip(SkipReason::Excluded);
+        }
+        // Following a logout link ends the session the crawl depends on.
+        if rule.is_none() && kind == LinkKind::Page && looks_like_logout(url) {
+            return Decision::Skip(SkipReason::Logout);
         }
         if kind == LinkKind::Page && self.max_depth.is_some_and(|max| depth > max) {
             return Decision::Skip(SkipReason::TooDeep);
@@ -237,5 +246,57 @@ mod tests {
                 follow_links: false
             }
         );
+    }
+}
+
+/// Path segments that log the user out when visited.
+const LOGOUT_WORDS: &[&str] = &[
+    "logout", "log-out", "log_out", "signout", "sign-out", "sign_out", "logoff",
+];
+
+fn looks_like_logout(url: &Url) -> bool {
+    let in_path = url.path_segments().is_some_and(|mut segments| {
+        segments.any(|segment| {
+            let stem = segment
+                .split('.')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            LOGOUT_WORDS.contains(&stem.as_str())
+        })
+    });
+    let in_query = url
+        .query_pairs()
+        .any(|(_, value)| LOGOUT_WORDS.contains(&value.to_ascii_lowercase().as_str()));
+    in_path || in_query
+}
+
+#[cfg(test)]
+mod logout_tests {
+    use super::*;
+
+    #[test]
+    fn spots_logout_links() {
+        let policy = Policy {
+            scope: Scope::new(["site.test".to_owned()]),
+            rules: vec![Rule::new("/keep/logout", RuleAction::Include).unwrap()],
+            include_external_assets: false,
+            max_depth: None,
+        };
+        let decide = |s: &str| policy.decide(&Url::parse(s).unwrap(), LinkKind::Page, 1);
+        let skipped = Decision::Skip(SkipReason::Logout);
+        for url in [
+            "https://site.test/logout",
+            "https://site.test/account/Sign-Out.php",
+            "https://site.test/index.php?action=logout",
+        ] {
+            assert_eq!(decide(url), skipped, "{url}");
+        }
+        assert_ne!(
+            decide("https://site.test/blog/logout-tips-for-admins"),
+            skipped
+        );
+        // An explicit include wins.
+        assert_ne!(decide("https://site.test/keep/logout"), skipped);
     }
 }

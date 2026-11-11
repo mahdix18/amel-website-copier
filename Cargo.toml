@@ -34,7 +34,9 @@ lol_html = "3.0.3"
 mime_guess = "2.0.5"
 percent-encoding = "2.3.2"
 # Pre-1.0 and its build script fetches a matching driver; pin exactly.
-playwright-rs = "=0.20.1"
+# No default features: they add OpenSSL (for remote-browser websockets we
+# don't use), which clashes at link time with wreq's BoringSSL.
+playwright-rs = { version = "=0.20.1", default-features = false, features = ["ring"] }
 regex = "1.13.1"
 rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }

@@ -248,11 +248,22 @@ fn open_existing(dir: &Path) -> Result<(SqliteStore, Url, CrawlOptions), String>
 fn build_requester(
     registry: &RequesterRegistry,
     options: &CrawlOptions,
+    login: Option<serde_json::Value>,
     shared: &SharedResources,
 ) -> Result<Arc<dyn Requester>, String> {
+    let uses_browser = options.requester == AUTO_ID || options.requester == "playwright";
+    if login.is_some() && !uses_browser {
+        return Err("--login-script needs --requester playwright or auto".to_owned());
+    }
     let build = |id: &str| {
+        let mut config = options.requester_config(id);
+        if id == "playwright"
+            && let (Some(steps), Some(object)) = (&login, config.as_object_mut())
+        {
+            object.insert("login".to_owned(), steps.clone());
+        }
         registry
-            .build(id, &options.requester_config(id), shared)
+            .build(id, &config, shared)
             .map_err(|error| error.to_string())
     };
     if options.requester != AUTO_ID {
@@ -313,7 +324,11 @@ impl Run {
         if let Err(message) = self.session.apply(&mut config, &shared) {
             return (usage_error(&message), None);
         }
-        let requester = match build_requester(registry, &self.options, &shared) {
+        let requester = match self
+            .session
+            .login_steps()
+            .and_then(|login| build_requester(registry, &self.options, login, &shared))
+        {
             Ok(requester) => requester,
             Err(message) => return (usage_error(&message), None),
         };

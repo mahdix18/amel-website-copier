@@ -217,9 +217,33 @@ pub struct SessionArgs {
     /// Netscape cookies.txt to start the session with.
     #[arg(long, value_name = "FILE")]
     pub cookies: Option<PathBuf>,
+
+    /// JSON login steps run in the browser before the crawl (needs
+    /// `--requester playwright` or `auto`). See the README for the format.
+    #[arg(long, value_name = "FILE")]
+    pub login_script: Option<PathBuf>,
 }
 
 impl SessionArgs {
+    /// The login steps from `--login-script`, as the browser requester's
+    /// `login` config value.
+    pub fn login_steps(&self) -> Result<Option<Value>, String> {
+        let Some(path) = &self.login_script else {
+            return Ok(None);
+        };
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read login script {}: {e}", path.display()))?;
+        let steps: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("login script {} is not valid JSON: {e}", path.display()))?;
+        if !steps.is_array() {
+            return Err(format!(
+                "login script {} must be a JSON array of steps",
+                path.display()
+            ));
+        }
+        Ok(Some(steps))
+    }
+
     pub fn apply(&self, config: &mut CrawlConfig, shared: &SharedResources) -> Result<(), String> {
         config.credentials = self
             .auth
