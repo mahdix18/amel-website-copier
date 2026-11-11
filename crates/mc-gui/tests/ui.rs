@@ -13,8 +13,14 @@ use gpui_kit::{
 use mc_fixtures::{FixtureServer, Site};
 use mc_gui::CopyWindow;
 use mc_gui::job::Phase;
+use mc_gui::projects::Projects;
 
-fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<CopyWindow>) {
+/// Opens the window with a throwaway project list.
+fn open(
+    cx: &mut TestAppContext,
+    projects: &std::path::Path,
+) -> (WindowHandle<Root>, Entity<CopyWindow>) {
+    let projects = Projects::load(Some(projects.join("projects.json")));
     cx.update(|cx| {
         gpui_kit::init(cx);
         let bounds = Bounds {
@@ -26,7 +32,7 @@ fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<CopyWindow>) {
             ..Default::default()
         };
         let (window, view) = gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| CopyWindow::new(window, cx))
+            cx.new(|cx| CopyWindow::with_projects(projects, window, cx))
         })
         .unwrap();
         (window.downcast::<Root>().unwrap(), view)
@@ -35,7 +41,8 @@ fn open(cx: &mut TestAppContext) -> (WindowHandle<Root>, Entity<CopyWindow>) {
 
 #[gpui_kit::test]
 fn explains_what_is_wrong_with_the_form(cx: &mut TestAppContext) {
-    let (handle, _) = open(cx);
+    let config = tempfile::tempdir().unwrap();
+    let (handle, _) = open(cx, config.path());
     cx.update_window(handle.into(), |_, window, cx| {
         window.render_frame(cx);
         assert_eq!(window.find("status").label(), Some("Ready."));
@@ -57,7 +64,8 @@ fn copies_a_site_from_the_window(cx: &mut TestAppContext) {
         .block_on(FixtureServer::start(Site::StaticBlog))
         .unwrap();
     let out = tempfile::tempdir().unwrap();
-    let (handle, view) = open(cx);
+    let config = tempfile::tempdir().unwrap();
+    let (handle, view) = open(cx, config.path());
 
     cx.update_window(handle.into(), |_, window, cx| {
         let output = out.path().to_string_lossy().into_owned();
@@ -105,8 +113,58 @@ fn copies_a_site_from_the_window(cx: &mut TestAppContext) {
     })
     .unwrap();
 
+    // The copy is remembered in the sidebar, and its page tree can be shown.
+    cx.update(|cx| assert_eq!(view.read(cx).projects().items.len(), 1));
+    assert!(config.path().join("projects.json").is_file());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert_eq!(window.find("project-0").label(), Some("127.0.0.1"));
+        // Finished copies can be updated.
+        assert!(window.try_find("update").is_some());
+        window.click("tab-map", cx);
+        let count = window
+            .find("map-count")
+            .label()
+            .unwrap_or_default()
+            .to_owned();
+        let pages: usize = count.split(' ').next().unwrap().parse().unwrap();
+        assert!(pages >= 5, "{count}");
+    })
+    .unwrap();
+
     let host = format!("127.0.0.1_{}", server.addr().port());
     assert!(out.path().join(&host).join("posts/café.html").is_file());
     assert!(out.path().join("mistercopy-report.html").is_file());
     drop(runtime);
+}
+
+#[gpui_kit::test]
+fn tests_rules_before_copying(cx: &mut TestAppContext) {
+    let config = tempfile::tempdir().unwrap();
+    let (handle, _) = open(cx, config.path());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("url", cx);
+        window.input("https://site.test/", cx);
+        window.click("tab-rules", cx);
+        window.click("exclude", cx);
+        window.input("/private/", cx);
+        window.click("test-url", cx);
+        window.input("https://site.test/private/report.html", cx);
+        window.click("test", cx);
+        assert_eq!(
+            window.find("verdict").label(),
+            Some("Skipped: excluded by a rule.")
+        );
+
+        window.click("test-url", cx);
+        window.press("ctrl-a", cx);
+        window.input("https://site.test/blog/", cx);
+        window.click("test", cx);
+        assert_eq!(
+            window.find("verdict").label(),
+            Some("Copied, and its links are followed.")
+        );
+    })
+    .unwrap();
 }

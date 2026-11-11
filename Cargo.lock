@@ -4755,6 +4755,7 @@ dependencies = [
  "mc-requester-playwright",
  "mc-requester-wreq",
  "mc-store",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

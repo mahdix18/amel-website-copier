@@ -32,7 +32,13 @@ Press Ctrl-C once to stop after the requests in flight; progress is saved. Press
 cargo run --release -p mc-gui
 ```
 
-Enter a site's address and a folder, then click **Copy**. The window shows each file as it arrives, counts what was saved and what failed, and opens the report when the copy is done. **Stop** saves progress; copying the same site into the same folder again continues where it stopped. Copies made in the app can also be resumed or updated with `mistercopy resume` and `mistercopy update`.
+Enter a site's address and a folder, then click **Copy**. The window shows each file as it arrives, counts what was saved and what failed, and opens the report when the copy is done. **Stop** saves progress; copying the same site into the same folder again continues where it stopped.
+
+- **Copies** (left): every copy you've made, with its status, remembered in `~/.config/mistercopy/projects.json`. Select one to work on it again; finished copies get an **Update** button that only downloads what changed.
+- **Rules**: patterns of URLs to skip or to fetch from other sites, and a tester that says what the crawler would do with any URL before you copy.
+- **Link map**: the pages of a copy as a tree, each under the page that first linked to it, with failures and skips marked.
+
+Copies made in the app can also be resumed or updated with `mistercopy resume` and `mistercopy update`, which reuse the app's choices.
 
 Build with `--features browser` to add a **Render JavaScript** option, which uses `--requester auto`.
 

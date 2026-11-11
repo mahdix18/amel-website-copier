@@ -295,15 +295,17 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - `browsers status|install`
   - the `spa` fixture (vanilla JavaScript rather than React) and the `auth` fixture
 - **Deferred from M3:** choosing a requester per rule (one requester per crawl for now).
-- **M4 started:**
-  - `mistercopy-gui` (gpui-kit 0.9.1) with a copy form (address, folder, optional Render JavaScript), Copy and Stop, live counters and a log, and the summary with an Open report button
-  - copies resume automatically and share their state format with the CLI
-  - headless UI tests drive a full copy through the window
+- **M4 mostly done.** `mistercopy-gui` (gpui-kit 0.9.1) has:
+  - a copies sidebar, remembered across launches, with each copy's status
+  - the copy form (address, folder, optional Render JavaScript), with Copy, Update, Stop and Open report
+  - live counters and a log
+  - a Rules tab whose live tester uses the crawler's own rule engine
+  - a Link map tab showing the page tree from the saved state
+  - shared state with the CLI, so either can resume or update a copy
+  - headless UI tests that drive a copy, the sidebar, the link map and the rule tester
 - **Still open in M4:**
-  - the projects sidebar
-  - the project editor with the live rule tester
-  - the link-map view
   - a command palette
+  - the link map as a graph, with SVG/PNG export
   - a check of the startup and memory targets
 
 ## 10. Risks & open questions

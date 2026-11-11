@@ -30,6 +30,12 @@ pub struct Settings {
     pub render_js: bool,
     /// Minimum gap between two requests to the same host.
     pub per_host_delay: Duration,
+    /// Skip URLs matching this regex (empty: none).
+    pub exclude: String,
+    /// Fetch URLs matching this regex even outside the site (empty: none).
+    pub include: String,
+    /// Re-check a finished copy instead of starting over.
+    pub update: bool,
 }
 
 /// Whether this build can render JavaScript with Chromium.
@@ -97,23 +103,43 @@ pub fn start(settings: &Settings) -> Result<Running, String> {
         store.status(),
         Ok(Some(CrawlStatus::Running | CrawlStatus::Stopped))
     );
+    let complete = matches!(store.status(), Ok(Some(CrawlStatus::Complete)));
+    let rules = crate::insight::rules(&settings.exclude, &settings.include)?;
     let resumed = same_site && unfinished;
-    if !resumed {
+    if settings.update {
+        if !(same_site && complete) {
+            return Err(
+                "Only a finished copy of this site can be updated. Copy it first.".to_owned(),
+            );
+        }
+        store.begin_update().map_err(|e| e.to_string())?;
+    } else if !resumed {
         store.reset().map_err(|e| e.to_string())?;
-        let requester_id = if settings.render_js { "auto" } else { "wreq" };
         store
             .set_meta(META_SEED, seed.as_str())
-            .and_then(|()| {
-                store.set_meta(
-                    META_OPTIONS,
-                    &format!(r#"{{"requester":"{requester_id}"}}"#),
-                )
-            })
             .map_err(|e| e.to_string())?;
     }
+    // Saved so the command line's `resume` and `update` repeat these choices.
+    let list = |pattern: &str| {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            vec![]
+        } else {
+            vec![pattern.to_owned()]
+        }
+    };
+    let options = serde_json::json!({
+        "requester": if settings.render_js { "auto" } else { "wreq" },
+        "exclude": list(&settings.exclude),
+        "include": list(&settings.include),
+    });
+    store
+        .set_meta(META_OPTIONS, &options.to_string())
+        .map_err(|e| e.to_string())?;
 
     let mut config = CrawlConfig::new(seed, &output);
     config.per_host_delay = settings.per_host_delay;
+    config.rules = rules;
     let crawler = Crawler::new(config, requester).with_store(store);
     let stop = crawler.stop_handle();
     let events = crawler.subscribe();
@@ -299,6 +325,9 @@ mod tests {
             output: output.to_owned(),
             render_js: false,
             per_host_delay: Duration::ZERO,
+            exclude: String::new(),
+            include: String::new(),
+            update: false,
         }
     }
 

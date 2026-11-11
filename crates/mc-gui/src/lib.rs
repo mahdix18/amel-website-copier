@@ -3,6 +3,8 @@
 //! tokio runtime; the window only listens to its events.
 
 pub mod app;
+pub mod insight;
 pub mod job;
+pub mod projects;
 
 pub use app::CopyWindow;
