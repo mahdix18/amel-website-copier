@@ -7,21 +7,36 @@ use std::time::Duration;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, Context, Entity, FontWeight, Hsla, Role, SharedString, TestSupportExt, Window, div,
-    px,
+    AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
+    KeyDownEvent, Role, SharedString, TestSupportExt, Window, actions, div, px,
 };
 use mc_core::{StopHandle, human_bytes};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::insight::{self, MapLine};
 use crate::job::{self, Progress, Settings};
+use crate::palette::{self, Command};
 use crate::projects::{Project, Projects};
 
 /// Lines of the link map shown at once.
 const MAP_LIMIT: usize = 500;
+/// Matches listed in the command palette.
+const PALETTE_ROWS: usize = 8;
+/// Written next to the report by "Export link map as SVG".
+pub const LINK_MAP_SVG: &str = "mistercopy-linkmap.svg";
+
+actions!(mistercopy, [TogglePalette]);
+
+/// Keyboard shortcuts; call once when the app starts.
+pub fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-k", TogglePalette, None),
+        KeyBinding::new("cmd-k", TogglePalette, None),
+    ]);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
@@ -46,6 +61,12 @@ pub struct CopyWindow {
     stop: Option<StopHandle>,
     rule_verdict: String,
     link_map: Result<Vec<MapLine>, String>,
+    map_notice: String,
+    focus: FocusHandle,
+    palette_open: bool,
+    palette_query: Entity<InputState>,
+    /// Set once the startup probe (MISTERCOPY_PROBE) has been armed.
+    probed: bool,
 }
 
 impl CopyWindow {
@@ -58,6 +79,22 @@ impl CopyWindow {
         let input = |placeholder: &'static str, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
         };
+        let palette_query = input("Type a command…", window, cx);
+        // Enter runs the best match.
+        cx.subscribe_in(
+            &palette_query,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event
+                    && let Some((_, command)) = this.palette_matches(cx).into_iter().next()
+                {
+                    this.run(command, window, cx);
+                }
+            },
+        )
+        .detach();
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
         Self {
             url: input("https://example.com", window, cx),
             output: cx.new(|cx| InputState::new(window, cx).default_value(job::default_output())),
@@ -73,7 +110,153 @@ impl CopyWindow {
             stop: None,
             rule_verdict: String::new(),
             link_map: Ok(Vec::new()),
+            map_notice: String::new(),
+            focus,
+            palette_open: false,
+            palette_query,
+            probed: false,
         }
+    }
+
+    fn can_update(&self) -> bool {
+        self.selected
+            .and_then(|i| self.projects.items.get(i))
+            .is_some_and(|p| p.status() == crate::projects::ProjectStatus::Complete)
+    }
+
+    fn palette_matches(&self, cx: &Context<Self>) -> Vec<(String, Command)> {
+        let names: Vec<String> = self.projects.items.iter().map(Project::name).collect();
+        let commands = palette::commands(&palette::Context {
+            running: self.progress.running(),
+            can_update: self.can_update(),
+            has_report: self.progress.report.is_some(),
+            projects: &names,
+        });
+        palette::matching(commands, &Self::text(&self.palette_query, cx))
+    }
+
+    fn toggle_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette_open {
+            return self.close_palette(window, cx);
+        }
+        self.palette_open = true;
+        self.palette_query
+            .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        window.focus(&self.palette_query.focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = false;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    fn run(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_palette(window, cx);
+        match command {
+            Command::NewCopy => self.select(None, window, cx),
+            Command::Select(index) => self.select(Some(index), window, cx),
+            Command::Start => self.start(false, cx),
+            Command::Update => self.start(true, cx),
+            Command::Stop => self.stop(cx),
+            Command::Show(tab) => {
+                self.tab = tab;
+                if tab == Tab::LinkMap {
+                    self.refresh_map(cx);
+                }
+            }
+            Command::ExportMap => {
+                self.tab = Tab::LinkMap;
+                self.export_map(cx);
+            }
+            Command::OpenReport => {
+                if let Some(report) = &self.progress.report {
+                    cx.open_url(&format!("file://{}", report.display()));
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    fn export_map(&mut self, cx: &mut Context<Self>) {
+        self.refresh_map(cx);
+        let output = PathBuf::from(Self::text(&self.output, cx).trim());
+        self.map_notice = match &self.link_map {
+            Ok(lines) if !lines.is_empty() => {
+                let path = output.join(LINK_MAP_SVG);
+                match std::fs::write(&path, insight::link_map_svg(lines)) {
+                    Ok(()) => {
+                        cx.open_url(&format!("file://{}", path.display()));
+                        format!("Saved {}", path.display())
+                    }
+                    Err(error) => format!("Could not save {}: {error}", path.display()),
+                }
+            }
+            Ok(_) => "Nothing to export yet.".to_owned(),
+            Err(message) => message.clone(),
+        };
+        cx.notify();
+    }
+
+    fn palette(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let (background, border, muted, accent) = (
+            theme.popover,
+            theme.border,
+            theme.muted_foreground,
+            theme.accent,
+        );
+        let matches = self.palette_matches(cx);
+        let rows =
+            matches
+                .into_iter()
+                .take(PALETTE_ROWS)
+                .enumerate()
+                .map(|(index, (label, command))| {
+                    div()
+                        .id(SharedString::from(format!("cmd-{index}")))
+                        .test_support()
+                        .aria_label(SharedString::from(label.clone()))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(index == 0, |el| el.bg(accent))
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.run(command, window, cx)),
+                        )
+                        .child(label)
+                });
+        div()
+            .id("palette")
+            .test_support()
+            .absolute()
+            .top(px(70.))
+            .left(px(280.))
+            .w(px(440.))
+            .p_2()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .bg(background)
+            .border_1()
+            .border_color(border)
+            .rounded_lg()
+            .shadow_lg()
+            .child(
+                Input::new(&self.palette_query)
+                    .id("palette-query")
+                    .aria_label("Command"),
+            )
+            .children(rows)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(muted)
+                    .child("Enter runs the first match · Esc closes"),
+            )
+            .into_any_element()
     }
 
     pub fn progress(&self) -> &Progress {
@@ -473,6 +656,12 @@ impl CopyWindow {
                             .on_click(cx.listener(|this, _, _, cx| this.refresh_map(cx))),
                     )
                     .child(
+                        Button::new("export-map")
+                            .outline()
+                            .label("Export SVG")
+                            .on_click(cx.listener(|this, _, _, cx| this.export_map(cx))),
+                    )
+                    .child(
                         div()
                             .id("map-count")
                             .test_support()
@@ -484,6 +673,17 @@ impl CopyWindow {
                             )),
                     ),
             )
+            .when(!self.map_notice.is_empty(), |el| {
+                el.child(
+                    div()
+                        .id("map-notice")
+                        .test_support()
+                        .aria_label(SharedString::from(self.map_notice.clone()))
+                        .text_sm()
+                        .text_color(muted)
+                        .child(self.map_notice.clone()),
+                )
+            })
             .child(
                 div()
                     .id("map")
@@ -502,7 +702,19 @@ impl CopyWindow {
 }
 
 impl Render for CopyWindow {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.probed && std::env::var_os("MISTERCOPY_PROBE").is_some() {
+            // Measures startup: report once the first frame is on screen, then quit.
+            self.probed = true;
+            window.on_next_frame(|_, cx| {
+                println!(
+                    "startup_ms={} rss_kb={}",
+                    crate::startup_ms(),
+                    crate::rss_kb().unwrap_or(0)
+                );
+                cx.quit();
+            });
+        }
         let (background, foreground, muted) = {
             let theme = cx.theme();
             (theme.background, theme.foreground, theme.muted_foreground)
@@ -514,8 +726,24 @@ impl Render for CopyWindow {
             Tab::Rules => self.rules_view(cx),
             Tab::LinkMap => self.map_view(cx),
         };
+        let palette = self.palette_open.then(|| self.palette(cx));
+        let commands = Button::new("commands")
+            .ghost()
+            .label("Commands  Ctrl+K")
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_palette(window, cx)));
         div()
             .id("main-window")
+            .track_focus(&self.focus)
+            .key_context("MisterCopy")
+            .on_action(
+                cx.listener(|this, _: &TogglePalette, window, cx| this.toggle_palette(window, cx)),
+            )
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.palette_open && event.keystroke.key == "escape" {
+                    this.close_palette(window, cx);
+                }
+            }))
+            .relative()
             .size_full()
             .flex()
             .bg(background)
@@ -551,10 +779,18 @@ impl Render for CopyWindow {
                                             .child("Copy a website for offline browsing."),
                                     ),
                             )
-                            .child(tabs),
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(commands)
+                                    .child(tabs),
+                            ),
                     )
                     .child(view),
             )
+            .children(palette)
     }
 }
 

@@ -5,6 +5,29 @@
 pub mod app;
 pub mod insight;
 pub mod job;
+pub mod palette;
 pub mod projects;
 
-pub use app::CopyWindow;
+pub use app::{CopyWindow, bind_keys};
+
+use std::sync::OnceLock;
+use std::time::Instant;
+
+static STARTED: OnceLock<Instant> = OnceLock::new();
+
+/// Marks the moment the app started, for the startup probe.
+pub fn mark_start() {
+    let _ = STARTED.set(Instant::now());
+}
+
+/// Milliseconds since [`mark_start`].
+pub fn startup_ms() -> u128 {
+    STARTED.get().map_or(0, |start| start.elapsed().as_millis())
+}
+
+/// Resident memory of this process in KiB, where the OS reports it (Linux).
+pub fn rss_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
+}

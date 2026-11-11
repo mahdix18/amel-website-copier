@@ -2,8 +2,10 @@ use gpui_kit::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions,
 use mc_gui::CopyWindow;
 
 fn main() {
+    mc_gui::mark_start();
     gpui_kit::application().run(|cx| {
         gpui_kit::init(cx);
+        mc_gui::bind_keys(cx);
         let bounds = Bounds::centered(None, size(px(880.), px(680.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),

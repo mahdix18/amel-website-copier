@@ -23,6 +23,7 @@ fn open(
     let projects = Projects::load(Some(projects.join("projects.json")));
     cx.update(|cx| {
         gpui_kit::init(cx);
+        mc_gui::bind_keys(cx);
         let bounds = Bounds {
             origin: Point::default(),
             size: size(px(880.), px(680.)),
@@ -129,12 +130,25 @@ fn copies_a_site_from_the_window(cx: &mut TestAppContext) {
             .to_owned();
         let pages: usize = count.split(' ').next().unwrap().parse().unwrap();
         assert!(pages >= 5, "{count}");
+        // The tree exports as an SVG next to the report.
+        window.click("export-map", cx);
+        let notice = window
+            .find("map-notice")
+            .label()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(notice.starts_with("Saved "), "{notice}");
     })
     .unwrap();
 
     let host = format!("127.0.0.1_{}", server.addr().port());
     assert!(out.path().join(&host).join("posts/café.html").is_file());
     assert!(out.path().join("mistercopy-report.html").is_file());
+    let svg = std::fs::read_to_string(out.path().join(mc_gui::app::LINK_MAP_SVG)).unwrap();
+    assert!(
+        svg.starts_with("<svg") && svg.contains("posts/caf%C3%A9.html"),
+        "{svg}"
+    );
     drop(runtime);
 }
 
@@ -165,6 +179,47 @@ fn tests_rules_before_copying(cx: &mut TestAppContext) {
             window.find("verdict").label(),
             Some("Copied, and its links are followed.")
         );
+    })
+    .unwrap();
+}
+
+#[gpui_kit::test]
+fn command_palette_runs_commands(cx: &mut TestAppContext) {
+    let config = tempfile::tempdir().unwrap();
+    let (handle, _) = open(cx, config.path());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(window.try_find("palette").is_none());
+
+        window.press("ctrl-k", cx);
+        assert!(
+            window.try_find("palette").is_some(),
+            "Ctrl+K opens the palette"
+        );
+        window.input("link map", cx);
+        assert_eq!(window.find("cmd-0").label(), Some("Show link map"));
+        window.press("enter", cx);
+    })
+    .unwrap();
+    // The input reports Enter as an event, delivered once the update ends.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("palette").is_none(),
+            "running a command closes it"
+        );
+        assert!(
+            window.try_find("map-count").is_some(),
+            "the link map is showing"
+        );
+
+        window.click("commands", cx);
+        assert!(
+            window.try_find("palette").is_some(),
+            "the button opens it too"
+        );
+        window.press("escape", cx);
+        assert!(window.try_find("palette").is_none(), "Esc closes it");
     })
     .unwrap();
 }

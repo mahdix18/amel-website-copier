@@ -36,7 +36,8 @@ Enter a site's address and a folder, then click **Copy**. The window shows each 
 
 - **Copies** (left): every copy you've made, with its status, remembered in `~/.config/mistercopy/projects.json`. Select one to work on it again; finished copies get an **Update** button that only downloads what changed.
 - **Rules**: patterns of URLs to skip or to fetch from other sites, and a tester that says what the crawler would do with any URL before you copy.
-- **Link map**: the pages of a copy as a tree, each under the page that first linked to it, with failures and skips marked.
+- **Link map**: the pages of a copy as a tree, each under the page that first linked to it, with failures and skips marked. **Export SVG** saves it as a diagram (`mistercopy-linkmap.svg`, next to the report).
+- **Command palette**: press **Ctrl+K** (or click **Commands**) and type to run anything: start, update, stop, switch tabs, export, open a saved copy.
 
 Copies made in the app can also be resumed or updated with `mistercopy resume` and `mistercopy update`, which reuse the app's choices.
 

@@ -216,3 +216,94 @@ mod tests {
         assert_eq!(tree(&entries, 2).len(), 2);
     }
 }
+
+/// Row height and indent of the drawn link map, in pixels.
+const ROW: usize = 22;
+const INDENT: usize = 22;
+
+/// The link map drawn as a tree diagram, as a standalone SVG.
+pub fn link_map_svg(lines: &[MapLine]) -> String {
+    let widest = lines
+        .iter()
+        .map(|line| {
+            40 + line.depth * INDENT + (line.url.chars().count() + line.note.chars().count()) * 7
+        })
+        .max()
+        .unwrap_or(200);
+    let height = lines.len() * ROW + 40;
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{widest}\" height=\"{height}\" \
+         viewBox=\"0 0 {widest} {height}\" font-family=\"system-ui, sans-serif\" font-size=\"12\">\n\
+         <rect width=\"100%\" height=\"100%\" fill=\"#ffffff\"/>\n"
+    );
+    // The nearest earlier line one level up is each line's parent.
+    let mut parents: Vec<usize> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        parents.truncate(line.depth);
+        let (x, y) = (20 + line.depth * INDENT, 30 + index * ROW);
+        if let Some(&parent) = parents.last() {
+            let (px, py) = (20 + (line.depth - 1) * INDENT, 30 + parent * ROW);
+            svg.push_str(&format!(
+                "<path d=\"M{px} {py} V{y} H{x}\" fill=\"none\" stroke=\"#9198a1\"/>\n"
+            ));
+        }
+        let color = if line.note.is_empty() {
+            "#2563eb"
+        } else {
+            "#cf222e"
+        };
+        svg.push_str(&format!(
+            "<circle cx=\"{x}\" cy=\"{y}\" r=\"4\" fill=\"{color}\"/>\n"
+        ));
+        svg.push_str(&format!(
+            "<text x=\"{}\" y=\"{}\" fill=\"#1f2328\">{}",
+            x + 10,
+            y + 4,
+            xml_escape(&line.url)
+        ));
+        if !line.note.is_empty() {
+            svg.push_str(&format!(
+                " <tspan fill=\"#cf222e\">({})</tspan>",
+                xml_escape(&line.note)
+            ));
+        }
+        svg.push_str("</text>\n");
+        parents.push(index);
+    }
+    svg.push_str("</svg>\n");
+    svg
+}
+
+fn xml_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod svg_tests {
+    use super::*;
+
+    #[test]
+    fn draws_edges_to_parents() {
+        let line = |url: &str, depth, note: &str| MapLine {
+            url: url.to_owned(),
+            depth,
+            note: note.to_owned(),
+        };
+        let svg = link_map_svg(&[
+            line("https://s.test/", 0, ""),
+            line("https://s.test/a?x=1&y=<2>", 1, ""),
+            line("https://s.test/a/b", 2, "failed: HTTP 404"),
+            line("https://s.test/c", 1, ""),
+        ]);
+        assert!(svg.starts_with("<svg") && svg.trim_end().ends_with("</svg>"));
+        assert_eq!(svg.matches("<circle").count(), 4);
+        // Root → a, a → b, root → c.
+        assert_eq!(svg.matches("<path").count(), 3);
+        assert!(svg.contains("M20 30 V96 H42"), "{svg}");
+        assert!(svg.contains("x=1&amp;y=&lt;2&gt;"));
+        assert!(svg.contains("(failed: HTTP 404)"));
+    }
+}

@@ -295,18 +295,19 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - `browsers status|install`
   - the `spa` fixture (vanilla JavaScript rather than React) and the `auth` fixture
 - **Deferred from M3:** choosing a requester per rule (one requester per crawl for now).
-- **M4 mostly done.** `mistercopy-gui` (gpui-kit 0.9.1) has:
-  - a copies sidebar, remembered across launches, with each copy's status
-  - the copy form (address, folder, optional Render JavaScript), with Copy, Update, Stop and Open report
-  - live counters and a log
-  - a Rules tab whose live tester uses the crawler's own rule engine
-  - a Link map tab showing the page tree from the saved state
-  - shared state with the CLI, so either can resume or update a copy
-  - headless UI tests that drive a copy, the sidebar, the link map and the rule tester
-- **Still open in M4:**
-  - a command palette
-  - the link map as a graph, with SVG/PNG export
-  - a check of the startup and memory targets
+- **M4 done, except the performance targets.** `mistercopy-gui` (gpui-kit 0.9.1) has:
+  - a copies sidebar, remembered across launches
+  - the copy form with Copy, Update, Stop and Open report, plus live counters and a log
+  - a Rules tab with a live tester that uses the crawler's own rule engine
+  - a Link map tab with SVG export (PNG export isn't done)
+  - a command palette (Ctrl+K)
+  - shared state with the CLI
+  - headless UI tests covering each feature
+- **Performance targets missed:** cold start and idle memory both come out about twice the targets. Measured 2026-11-11 with a release build on this Linux/Wayland machine, using the built-in `MISTERCOPY_PROBE=1`:
+  - cold start: 550–670 ms to the first frame, against under 300 ms
+  - memory: about 160 MB resident, against under 80 MB
+  - binary: 66.7 MB
+  - Next steps: profile how much of the memory is the Vulkan driver's mappings, try gpui-kit without its bundled assets, and initialize components lazily.
 
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.
