@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Data · spa</title></head>
+<body>
+  <p id="out">waiting</p>
+  <script>
+    // Runs on every load, offline too: only real (or replayed) data fills it.
+    const out = document.getElementById("out");
+    out.textContent = "loading";
+    fetch("/api/home.json")
+      .then((response) => response.json())
+      .then((page) => { out.textContent = "Loaded: " + page.title; })
+      .catch(() => { out.textContent = "failed"; });
+  </script>
+</body>
+</html>

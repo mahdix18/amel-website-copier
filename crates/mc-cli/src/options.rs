@@ -106,6 +106,19 @@ pub struct CrawlOptions {
     /// Don't scroll rendered pages to trigger lazy loading.
     #[arg(long)]
     pub no_scroll: bool,
+
+    /// Also archive every response in this WARC file (e.g. `site.warc.gz`).
+    #[arg(long, value_name = "FILE")]
+    pub warc: Option<PathBuf>,
+
+    /// Keep scripts in rendered pages and embed the data they fetched, so
+    /// JavaScript apps still load it offline (needs a browser requester).
+    #[arg(long)]
+    pub replay: bool,
+
+    /// Also pack the finished copy and its report into a zip file.
+    #[arg(long)]
+    pub zip: bool,
 }
 
 impl Default for CrawlOptions {
@@ -135,6 +148,8 @@ impl CrawlOptions {
         config.per_host_delay = Duration::from_millis(self.delay_ms);
         config.max_retries = self.retries;
         config.respect_robots = !self.ignore_robots;
+        config.warc = self.warc.clone();
+        config.replay = self.replay;
         Ok(config)
     }
 
@@ -170,7 +185,7 @@ impl CrawlOptions {
                         Value::String(path.to_string_lossy().into_owned()),
                     );
                 }
-                if self.keep_scripts {
+                if self.keep_scripts || self.replay {
                     set("keep_scripts", Value::Bool(true));
                 }
                 if self.no_scroll {

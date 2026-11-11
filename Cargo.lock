@@ -4684,7 +4684,9 @@ dependencies = [
 name = "mc-cli"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "clap",
+ "flate2",
  "mc-core",
  "mc-extract",
  "mc-fixtures",
@@ -4696,6 +4698,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tower-http 0.7.1",
+ "zip",
 ]
 
 [[package]]
@@ -4703,6 +4707,7 @@ name = "mc-core"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
+ "flate2",
  "httpdate",
  "mc-extract",
  "mc-requester",

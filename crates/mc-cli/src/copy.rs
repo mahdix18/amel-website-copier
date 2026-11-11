@@ -292,6 +292,7 @@ struct Run {
 impl Run {
     async fn execute(self, registry: &RequesterRegistry, store: Option<SqliteStore>) -> ExitCode {
         let output = self.output.clone();
+        let zip = self.options.zip;
         let (code, summary) = self.crawl(registry, store, false).await;
         if let Some(summary) = summary {
             if summary.stopped.is_some() {
@@ -302,6 +303,13 @@ impl Run {
                 output.join(REPORT_HTML).display(),
                 output.join(REPORT_JSON).display()
             );
+            // Only a finished copy is worth packing.
+            if zip && summary.stopped.is_none() {
+                match crate::archive::zip_copy(&output) {
+                    Ok(path) => println!("Zip: {}", path.display()),
+                    Err(error) => return usage_error(&format!("could not write the zip: {error}")),
+                }
+            }
         }
         code
     }

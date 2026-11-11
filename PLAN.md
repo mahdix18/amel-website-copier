@@ -309,6 +309,16 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - binary: 66.7 MB
   - Next steps: profile how much of the memory is the Vulkan driver's mappings, try gpui-kit without its bundled assets, and initialize components lazily.
 
+- **M5 done:**
+  - WARC 1.1 output (`--warc`, gzip per record, appended to on resume)
+  - zip output (`--zip`)
+  - `mistercopy serve`
+  - the offline replay shim (`--replay`): captured JSON/text/XML embedded per host and answered to `fetch` and XHR, even from `file://`
+  - Link map SVG export came with M4.
+- **Caveats:**
+  - WARC files are checked by the project's own reader (gzip framing, record lengths, ids), not yet by `warcio`.
+  - Client-side routes still need `serve`: under `file://`, a path-routed app sees the file path as its route.
+
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.
 - **Playwright from Rust** still needs the Playwright driver plus Chromium (about 150 MB+ downloaded on demand). If that proves painful, `chromiumoxide` (pure-Rust CDP) is the drop-in alternative requester. The trait makes the swap cheap.

@@ -9,11 +9,13 @@
 mod crawler;
 mod normalize;
 mod path;
+mod replay;
 mod report;
 mod retry;
 mod robots;
 mod rules;
 mod store;
+mod warc;
 
 pub use crawler::{
     CrawlConfig, CrawlError, CrawlEvent, CrawlSummary, Crawler, Credential, REPORT_HTML,
@@ -22,6 +24,7 @@ pub use crawler::{
 pub use mc_extract::LinkKind;
 pub use normalize::normalize;
 pub use path::{LocalPath, PathAllocator, map_url};
+pub use replay::REPLAY_SCRIPT;
 pub use report::{Report, human_bytes};
 pub use rules::{Decision, Policy, Rule, RuleAction, Scope, SkipReason};
 pub use store::{

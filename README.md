@@ -2,7 +2,7 @@
 
 A lightweight website copier for offline browsing, written in Rust. See [PLAN.md](PLAN.md) for the design and milestones.
 
-**Status:** M3. MisterCopy copies sites through a browser-impersonating HTTP client and rewrites their links to work offline. It retries transient failures, respects robots.txt, can stop and resume, updates a copy by downloading only what changed, and writes a report. With the `browser` feature it also renders JavaScript-built pages in Chromium and can log in through a real browser. A first version of the desktop app (M4) copies a site from a window.
+**Status:** M3. MisterCopy copies sites through a browser-impersonating HTTP client and rewrites their links to work offline. It retries transient failures, respects robots.txt, can stop and resume, updates a copy by downloading only what changed, and writes a report. With the `browser` feature it also renders JavaScript-built pages in Chromium and can log in through a real browser. The desktop app (M4) does all of this from a window, and copies can also be saved as WARC archives or zip files (M5).
 
 ## Usage
 
@@ -25,6 +25,23 @@ mistercopy scan https://example.com --report links.html   # audit only, saves no
 ```
 
 Press Ctrl-C once to stop after the requests in flight; progress is saved. Press it twice to quit at once.
+
+### Archives and serving
+
+```bash
+mistercopy copy https://example.com -o ./copies --warc example.warc.gz --zip
+```
+
+- `--warc FILE` also writes every response, as served, to a standard web archive: WARC 1.1, one gzip member per record. `resume` keeps appending to the same file.
+- `--zip` packs the finished copy and its report into `<host>.zip`.
+
+```bash
+mistercopy serve ./copies   # http://127.0.0.1:8000/
+```
+
+`serve` is for copies that need http rather than `file://`, such as JavaScript apps that load data from absolute paths.
+
+For those apps, `--requester playwright --replay` keeps their scripts and embeds the data they fetched (JSON, text, XML) in `mistercopy-replay.js`. The script answers the app's own `fetch` and `XMLHttpRequest` calls offline, even from `file://`.
 
 ### Desktop app
 

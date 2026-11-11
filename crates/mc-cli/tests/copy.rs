@@ -345,3 +345,62 @@ async fn cli_scan_saves_only_the_report() {
     assert!(String::from_utf8_lossy(&scanned.stdout).contains("Checked"));
     server.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn cli_writes_warc_and_zip() {
+    let server = FixtureServer::start(Site::StaticBlog).await.unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let dir = out.path().join("copy");
+    let warc = out.path().join("blog.warc.gz");
+    let copied = mistercopy(&[
+        "copy",
+        server.base_url().as_str(),
+        "--delay-ms",
+        "0",
+        "-q",
+        "--warc",
+        warc.to_str().unwrap(),
+        "--zip",
+        "-o",
+        dir.to_str().unwrap(),
+    ])
+    .await;
+    assert!(
+        copied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&copied.stderr)
+    );
+
+    let mut text = String::new();
+    std::io::Read::read_to_string(
+        &mut flate2::read::MultiGzDecoder::new(std::fs::File::open(&warc).unwrap()),
+        &mut text,
+    )
+    .unwrap();
+    let host = format!("127.0.0.1_{}", server.addr().port());
+    let saved = files(&dir.join(&host)).len();
+    assert_eq!(
+        text.matches("WARC-Type: response").count(),
+        saved,
+        "one record per saved file"
+    );
+    assert!(text.contains(&format!(
+        "WARC-Target-URI: {}posts/caf%C3%A9.html",
+        server.base_url()
+    )));
+    assert!(
+        text.contains("<h1>Café</h1>"),
+        "bodies are stored as served"
+    );
+
+    let zip_path = dir.join(format!("{host}.zip"));
+    let zip_bytes = std::fs::read(&zip_path).unwrap();
+    assert!(zip_bytes.starts_with(b"PK"), "a zip file");
+    let index_entry = format!("{host}/index.html");
+    assert!(
+        zip_bytes
+            .windows(index_entry.len())
+            .any(|w| w == index_entry.as_bytes())
+    );
+    server.stop().await.unwrap();
+}

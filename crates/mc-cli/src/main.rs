@@ -1,3 +1,4 @@
+mod archive;
 mod copy;
 mod options;
 
@@ -44,6 +45,14 @@ enum Command {
     },
     /// Log in by hand in a browser window and save the session for `--cookies`.
     Login(LoginArgs),
+    /// Serve a copy on localhost, for sites that need http rather than file://.
+    Serve {
+        /// The output directory of a copy.
+        #[arg(default_value = ".")]
+        dir: std::path::PathBuf,
+        #[arg(long, default_value_t = 8000)]
+        port: u16,
+    },
 }
 
 #[derive(clap::Args)]
@@ -160,6 +169,41 @@ async fn main() -> ExitCode {
         } => list_requesters(&registry().list(), json),
         Command::Browsers { command } => browsers(command).await,
         Command::Login(args) => login(args).await,
+        Command::Serve { dir, port } => serve(&dir, port).await,
+    }
+}
+
+async fn serve(dir: &std::path::Path, port: u16) -> ExitCode {
+    let root = match archive::serve_root(dir) {
+        Ok(root) => root,
+        Err(error) => {
+            eprintln!("error: cannot read {}: {error}", dir.display());
+            return ExitCode::from(2);
+        }
+    };
+    let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("error: cannot listen on port {port}: {error}");
+            return ExitCode::from(2);
+        }
+    };
+    println!(
+        "Serving {} at http://127.0.0.1:{port}/ (Ctrl-C to stop)",
+        root.display()
+    );
+    let app = axum::Router::new().fallback_service(tower_http::services::ServeDir::new(root));
+    let served = axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await;
+    match served {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 

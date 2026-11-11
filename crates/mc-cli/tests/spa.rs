@@ -133,3 +133,66 @@ async fn auto_uses_the_browser_only_where_needed() {
     assert!(blog.summary.failed.is_empty(), "{:?}", blog.summary.failed);
     assert!(read(&blog, "index.html").contains("<script"));
 }
+
+/// The text of `#out` once `file` has run its scripts in Chromium, offline.
+async fn offline_text(file: &std::path::Path) -> String {
+    use mc_requester_playwright::playwright_rs::{LaunchOptions, Playwright};
+    let playwright = Playwright::launch().await.unwrap();
+    let executable = installed_chromium().remove(0);
+    let browser = playwright
+        .chromium()
+        .launch_with_options(
+            LaunchOptions::new()
+                .headless(true)
+                .executable_path(executable.to_string_lossy().into_owned()),
+        )
+        .await
+        .unwrap();
+    let page = browser.new_page().await.unwrap();
+    let url = mc_requester::Url::from_file_path(file).unwrap();
+    page.goto(url.as_str(), None).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let text: String = page
+        .evaluate::<(), String>("() => document.getElementById('out').textContent", None)
+        .await
+        .unwrap();
+    let _ = browser.close().await;
+    text
+}
+
+async fn copy_with_scripts(replay: bool) -> (tempfile::TempDir, PathBuf) {
+    let server = FixtureServer::start(Site::Spa).await.unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let shared = SharedResources::default();
+    let requester = PlaywrightFactory
+        .build(&serde_json::json!({ "keep_scripts": true }), &shared)
+        .unwrap();
+    let mut config = CrawlConfig::new(server.base_url(), out.path());
+    config.per_host_delay = Duration::ZERO;
+    config.replay = replay;
+    let summary = Crawler::new(config, requester).run().await.unwrap();
+    assert!(summary.failed.is_empty(), "{:?}", summary.failed);
+    let root = host_dir(out.path(), server.addr().port());
+    server.stop().await.unwrap();
+    (out, root)
+}
+
+#[tokio::test]
+async fn replay_answers_fetches_offline() {
+    if !browser_available() {
+        return;
+    }
+    let (_out, root) = copy_with_scripts(true).await;
+    let data = root.join("data.html");
+    let html = std::fs::read_to_string(&data).unwrap();
+    assert!(
+        html.contains(r#"<script src="mistercopy-replay.js"></script>"#),
+        "{html}"
+    );
+    assert!(root.join(mc_core::REPLAY_SCRIPT).is_file());
+    assert_eq!(offline_text(&data).await, "Loaded: Welcome home");
+
+    // Without the shim the same page can't load its data from file://.
+    let (_bare, root) = copy_with_scripts(false).await;
+    assert_eq!(offline_text(&root.join("data.html")).await, "failed");
+}

@@ -19,6 +19,7 @@ use url::Url;
 
 use crate::normalize::normalize;
 use crate::path::{LocalPath, PathAllocator, hash_hex};
+use crate::replay::{self, Manifest, REPLAY_SCRIPT};
 use crate::report::Report;
 use crate::retry::{self, MAX_RETRY_AFTER};
 use crate::robots::{self, RobotsRules};
@@ -26,6 +27,7 @@ use crate::rules::{Decision, Policy, Rule, Scope, SkipReason};
 use crate::store::{
     CrawlStatus, Document, EntryState, SavedFile, StateStore, StoreError, UrlEntry,
 };
+use crate::warc::WarcWriter;
 
 /// Redirect hops followed between entries before giving up on a cycle.
 const MAX_ALIAS_HOPS: usize = 16;
@@ -65,6 +67,12 @@ pub struct CrawlConfig {
     /// Audit only: fetch and report, but write nothing.
     pub dry_run: bool,
     pub write_report: bool,
+    /// Also write every saved response to this WARC (`.warc.gz`) file.
+    pub warc: Option<PathBuf>,
+    /// Embed data that scripts fetched in a replay shim, so JavaScript
+    /// apps can load it offline. Useful with a browser requester that keeps
+    /// scripts.
+    pub replay: bool,
 }
 
 impl CrawlConfig {
@@ -90,6 +98,8 @@ impl CrawlConfig {
             credentials: Vec::new(),
             dry_run: false,
             write_report: true,
+            warc: None,
+            replay: false,
         }
     }
 }
@@ -274,6 +284,13 @@ impl Crawler {
             ..State::default()
         };
         self.restore(&mut state, &seeds)?;
+        if let Some(path) = self.config.warc.as_ref().filter(|_| !self.config.dry_run) {
+            let warc = WarcWriter::open(path).map_err(|source| CrawlError::Output {
+                path: path.clone(),
+                source,
+            })?;
+            state.warc = Some(warc);
+        }
         state.set_status(CrawlStatus::Running)?;
         self.requester
             .prepare()
@@ -283,6 +300,15 @@ impl Crawler {
         self.crawl(&mut state, &policy, started).await;
         if let Some(error) = state.store_error.take() {
             return Err(error.into());
+        }
+        if let Some(warc) = state.warc.as_mut()
+            && let Err(error) = warc.flush()
+        {
+            state.warc_error.get_or_insert(error);
+        }
+        if let Some(source) = state.warc_error.take() {
+            let path = self.config.warc.clone().unwrap_or_default();
+            return Err(CrawlError::Output { path, source });
         }
         if !self.config.dry_run {
             self.rewrite_documents(&mut state).await;
@@ -720,6 +746,17 @@ impl Crawler {
             body.len() as u64
         };
         state.bytes += body.len() as u64;
+        if !page.head {
+            self.archive(
+                state,
+                &final_url,
+                status,
+                &response.headers,
+                &body,
+                mime.as_deref(),
+                &path,
+            );
+        }
         state.record(page.entry(EntryState::Saved(SavedFile {
             path,
             mime,
@@ -802,6 +839,15 @@ impl Crawler {
         }
         let bytes = body.len() as u64;
         state.bytes += bytes;
+        self.archive(
+            state,
+            &url,
+            captured.status,
+            &captured.headers,
+            &body,
+            mime.as_deref(),
+            &path,
+        );
         state.record(job.entry(EntryState::Saved(SavedFile {
             path,
             mime,
@@ -907,6 +953,22 @@ impl Crawler {
             documents: documents.len(),
         });
 
+        // One replay script per host, shared by its pages.
+        let mut replay_scripts: HashMap<String, LocalPath> = HashMap::new();
+        for (host, manifest) in &state.replay {
+            let Some(script) = LocalPath::parse(&format!("{host}/{REPLAY_SCRIPT}")) else {
+                continue;
+            };
+            let file = self.config.output_dir.join(script.to_path_buf());
+            if !manifest.is_empty()
+                && write_atomic(&file, manifest.script().as_bytes())
+                    .await
+                    .is_ok()
+            {
+                replay_scripts.insert(host.clone(), script);
+            }
+        }
+
         let mut failures = Vec::new();
         for (url, path, document) in documents {
             let file = self.config.output_dir.join(path.to_path_buf());
@@ -935,9 +997,18 @@ impl Crawler {
                 }
             };
             let result = match rewritten {
-                Ok(bytes) => write_atomic(&file, &bytes)
-                    .await
-                    .map_err(|error| format!("could not write {}: {error}", file.display())),
+                Ok(bytes) => {
+                    let host = &path.segments()[0];
+                    let bytes = match (&document, replay_scripts.get(host)) {
+                        (Document::Html { .. }, Some(script)) => {
+                            replay::inject(&bytes, &path.relative_href(script))
+                        }
+                        _ => bytes,
+                    };
+                    write_atomic(&file, &bytes)
+                        .await
+                        .map_err(|error| format!("could not write {}: {error}", file.display()))
+                }
                 Err(error) => Err(error),
             };
             if let Err(reason) = result {
@@ -1005,6 +1076,43 @@ impl Crawler {
             .join(STATE_DIR)
             .join(ORIGINALS_DIR)
             .join(hash_hex(url.as_str(), 16))
+    }
+
+    /// Records a saved response in the WARC and, when it is data a script
+    /// fetched, in the replay manifest of its host.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one call per saved response, all parts needed"
+    )]
+    fn archive(
+        &self,
+        state: &mut State,
+        url: &Url,
+        status: StatusCode,
+        headers: &HeaderMap,
+        body: &[u8],
+        mime: Option<&str>,
+        path: &LocalPath,
+    ) {
+        if self.config.dry_run {
+            return;
+        }
+        if state.warc_error.is_none()
+            && let Some(warc) = state.warc.as_mut()
+            && let Err(error) = warc.response(url, status, headers, body)
+        {
+            state.warc_error = Some(error);
+        }
+        if self.config.replay
+            && let Some(mime) = mime.filter(|m| replay::is_data(m))
+        {
+            let key = match url.query() {
+                Some(query) => format!("{}?{query}", url.path()),
+                None => url.path().to_owned(),
+            };
+            let host = path.segments()[0].clone();
+            state.replay.entry(host).or_default().add(key, mime, body);
+        }
     }
 
     fn fail(&self, state: &mut State, job: &Job, reason: String) {
@@ -1102,6 +1210,10 @@ struct State {
     bytes: u64,
     unchanged: usize,
     stopped: Option<StopReason>,
+    warc: Option<WarcWriter>,
+    warc_error: Option<std::io::Error>,
+    /// Replay manifests, by host directory.
+    replay: HashMap<String, Manifest>,
 }
 
 impl State {

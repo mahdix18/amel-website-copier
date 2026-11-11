@@ -8,6 +8,7 @@ license.workspace = true
 
 [dependencies]
 base64.workspace = true
+flate2.workspace = true
 httpdate.workspace = true
 mc-extract.workspace = true
 mc-requester.workspace = true

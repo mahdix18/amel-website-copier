@@ -25,6 +25,9 @@ use tokio::sync::{OnceCell, Semaphore};
 
 pub const ID: &str = "playwright";
 
+/// For callers that drive a browser themselves, such as tests.
+pub use playwright_rs;
+
 /// Scrolls to the bottom until the page stops growing, so lazy-loaded
 /// content and infinite lists get a chance to load, then back to the top.
 const SCROLL_JS: &str = "async () => {
