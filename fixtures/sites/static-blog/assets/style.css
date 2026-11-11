@@ -1,0 +1,14 @@
+@import url("fonts.css");
+
+body {
+  font-family: system-ui, sans-serif;
+  max-width: 40rem;
+  margin: 2rem auto;
+  background: #fafafa url(../images/bg.svg) repeat;
+}
+
+header {
+  background-image: image-set("../images/logo.svg" 1x, "../images/logo-2x.svg" 2x);
+  background-repeat: no-repeat;
+  background-position: right center;
+}

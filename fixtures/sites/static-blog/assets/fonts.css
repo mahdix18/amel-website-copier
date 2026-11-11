@@ -1,0 +1,4 @@
+/* Reached only through @import in style.css. */
+main {
+  background-image: url('/images/pattern.svg');
+}

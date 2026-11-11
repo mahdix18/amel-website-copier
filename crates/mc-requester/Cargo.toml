@@ -1,0 +1,27 @@
+[package]
+name = "mc-requester"
+description = "The Requester trait that every MisterCopy fetch backend implements"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# In-memory requester for tests of the crawler and of requester consumers.
+mock = []
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+mc-requester = { path = ".", features = ["mock"] }
+tokio.workspace = true
+
+[lints]
+workspace = true
