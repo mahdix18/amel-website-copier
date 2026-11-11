@@ -48,6 +48,17 @@ async fn serves_the_static_blog() {
     }
 
     assert_eq!(get(&server, "/missing.html").await.0, 404);
+    assert_eq!(get(&server, "/old-about").await.0, 308);
+    server.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn ua_gate_turns_away_plain_clients() {
+    let server = FixtureServer::start(Site::UaGate).await.unwrap();
+    // The bare request `get` sends has no browser headers.
+    let (status, body) = get(&server, "/").await;
+    assert_eq!(status, 403);
+    assert_eq!(body, "browser required\n");
     server.stop().await.unwrap();
 }
 
@@ -60,6 +71,6 @@ fn site_names_round_trip() {
     let err = "nope".parse::<Site>().unwrap_err();
     assert_eq!(
         err.to_string(),
-        "unknown fixture site `nope` (available: static-blog)"
+        "unknown fixture site `nope` (available: static-blog, ua-gate)"
     );
 }

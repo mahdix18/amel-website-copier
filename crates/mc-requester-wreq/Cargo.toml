@@ -1,0 +1,22 @@
+[package]
+name = "mc-requester-wreq"
+description = "MisterCopy requester that speaks with real browser TLS and HTTP/2 fingerprints, via wreq"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+futures-util.workspace = true
+mc-requester.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wreq.workspace = true
+wreq-util.workspace = true
+
+[dev-dependencies]
+mc-fixtures.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

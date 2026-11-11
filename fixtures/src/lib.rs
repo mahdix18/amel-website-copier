@@ -1,8 +1,8 @@
 //! Local websites for MisterCopy's tests, served over real HTTP on loopback.
 //!
 //! Each [`Site`] is a directory under `fixtures/sites/` exercising one class of
-//! problem. More sites (`spa-react`, `auth`, `ua-gate`, `hostile`) arrive with
-//! the milestones that need them.
+//! problem. More sites (`spa-react`, `auth`, `hostile`) arrive with the
+//! milestones that need them.
 
 use std::fmt;
 use std::io;
@@ -11,6 +11,11 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use axum::Router;
+use axum::extract::Request;
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Redirect, Response};
+use axum::routing::get;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -19,17 +24,22 @@ use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Site {
-    /// Plain HTML and CSS: srcset, `@import`, query-string assets, and
-    /// filenames with spaces and non-ASCII characters.
+    /// Plain HTML and CSS: srcset, `@import`, query-string assets, a redirect,
+    /// and filenames with spaces and non-ASCII characters.
     StaticBlog,
+    /// Answers 403 to clients that don't send browser headers. Checks HTTP
+    /// headers only; a TLS-fingerprint check would need a TLS server that
+    /// inspects the ClientHello.
+    UaGate,
 }
 
 impl Site {
-    pub const ALL: &[Site] = &[Site::StaticBlog];
+    pub const ALL: &[Site] = &[Site::StaticBlog, Site::UaGate];
 
     pub fn name(self) -> &'static str {
         match self {
             Site::StaticBlog => "static-blog",
+            Site::UaGate => "ua-gate",
         }
     }
 
@@ -72,7 +82,37 @@ impl FromStr for Site {
 }
 
 pub fn router(site: Site) -> Router {
-    Router::new().fallback_service(ServeDir::new(site.root()))
+    let files = ServeDir::new(site.root());
+    match site {
+        Site::StaticBlog => Router::new()
+            .route(
+                "/old-about",
+                get(|| async { Redirect::permanent("/about/") }),
+            )
+            .fallback_service(files),
+        Site::UaGate => Router::new()
+            .fallback_service(files)
+            .layer(middleware::from_fn(require_browser)),
+    }
+}
+
+async fn require_browser(request: Request, next: Next) -> Response {
+    if looks_like_browser(request.headers()) {
+        next.run(request).await
+    } else {
+        (StatusCode::FORBIDDEN, "browser required\n").into_response()
+    }
+}
+
+/// Browsers send all of these; curl and plain HTTP libraries send none.
+fn looks_like_browser(headers: &HeaderMap) -> bool {
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    user_agent.starts_with("Mozilla/5.0")
+        && headers.contains_key("sec-fetch-mode")
+        && headers.contains_key(header::ACCEPT_LANGUAGE)
 }
 
 /// A running fixture site. Shuts down when stopped or dropped.

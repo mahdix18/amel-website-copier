@@ -1,7 +1,10 @@
+mod copy;
+
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use mc_requester::{RequesterInfo, RequesterRegistry};
+use mc_requester_wreq::WreqFactory;
 
 #[derive(Parser)]
 #[command(
@@ -15,7 +18,13 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "parsed once per process; boxing buys nothing"
+)]
 enum Command {
+    /// Copy a website into a local directory.
+    Copy(copy::CopyArgs),
     /// Inspect the fetch backends included in this build.
     Requesters {
         #[command(subcommand)]
@@ -33,14 +42,20 @@ enum RequestersCommand {
     },
 }
 
-/// Requester crates register here as they land: wreq in M1, Playwright in M3.
+/// Requester crates register here as they land: Playwright follows in M3.
 fn registry() -> RequesterRegistry {
-    RequesterRegistry::new()
+    let mut registry = RequesterRegistry::new();
+    registry
+        .register(WreqFactory)
+        .expect("requester ids are unique");
+    registry
 }
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::Copy(args) => copy::run(args, &registry()).await,
         Command::Requesters {
             command: RequestersCommand::List { json },
         } => list_requesters(&registry().list(), json),

@@ -1,0 +1,25 @@
+[package]
+name = "mc-core"
+description = "MisterCopy's crawler: scheduling, rules, URL-to-path mapping and link rewriting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mc-extract.workspace = true
+mc-requester.workspace = true
+mime_guess.workspace = true
+percent-encoding.workspace = true
+regex.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+unicode-normalization.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+mc-requester = { workspace = true, features = ["mock"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true
