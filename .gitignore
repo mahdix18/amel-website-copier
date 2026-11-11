@@ -1,2 +1,5 @@
 /target
 **/*.rs.bk
+
+# Copies made from inside the project folder
+/m/
