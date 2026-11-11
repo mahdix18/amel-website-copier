@@ -411,3 +411,38 @@ async fn limits_stop_resumably() {
         serde_json::from_slice(&std::fs::read(out.path().join(REPORT_JSON)).unwrap()).unwrap();
     assert_eq!(report["status"], "stopped: download size limit reached");
 }
+
+#[tokio::test]
+async fn soft_404_pages_are_not_saved_or_followed() {
+    let out = tempfile::tempdir().unwrap();
+    // Every missing file answers with the home page, whose relative image
+    // link would otherwise resolve one level deeper each time.
+    let home = r#"<img src="assets/img/logo.png"><a href="about">a</a>"#;
+    let mock = Arc::new(
+        MockRequester::new()
+            .route(url("https://site.test/"), MockRoute::html(home))
+            .route(url("https://site.test/about"), MockRoute::html(home))
+            .route(
+                url("https://site.test/assets/img/logo.png"),
+                MockRoute::html(home),
+            )
+            .route(
+                url("https://site.test/assets/img/assets/img/logo.png"),
+                MockRoute::html(home),
+            ),
+    );
+    let summary = Crawler::new(config(out.path()), mock.clone())
+        .run()
+        .await
+        .unwrap();
+
+    assert_eq!(summary.saved, 2, "the two real pages");
+    let (failed, reason) = &summary.failed[0];
+    assert_eq!(failed.path(), "/assets/img/logo.png");
+    assert!(reason.contains("probably a missing file"), "{reason}");
+    assert!(
+        !mock.calls().iter().any(|u| u.path().contains("img/assets")),
+        "no nesting"
+    );
+    assert!(!out.path().join("site.test/assets").exists());
+}

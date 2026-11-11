@@ -703,6 +703,19 @@ impl Crawler {
                 .map(str::to_owned)
         });
         let document = document_kind(mime.as_deref(), &response.headers);
+        // A "soft 404": an image, script or font link answered with the
+        // site's HTML page. Saving it is wrong, and following its relative
+        // links nests paths ever deeper.
+        if page.kind == LinkKind::Asset
+            && matches!(document, Some(Document::Html { .. }))
+            && let Some(expected) = mime_guess::from_path(final_url.path())
+                .first_raw()
+                .filter(|m| !matches!(*m, "text/html" | "application/xhtml+xml"))
+        {
+            let reason =
+                format!("got a web page where {expected} was expected (probably a missing file)");
+            return self.fail(state, &page, reason);
+        }
         let path = state.allocator.allocate(&final_url, mime.as_deref());
         let file = self.config.output_dir.join(path.to_path_buf());
 
