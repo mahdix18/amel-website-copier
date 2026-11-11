@@ -1,0 +1,10 @@
+body {
+  font-family: system-ui, sans-serif;
+  max-width: 40rem;
+  margin: 2rem auto;
+}
+
+/* Pushes the images below the fold, so they only load after scrolling. */
+.spacer {
+  height: 2500px;
+}

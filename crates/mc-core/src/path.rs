@@ -49,6 +49,13 @@ const HREF_SEGMENT: &AsciiSet = &CONTROLS
 pub struct LocalPath(Vec<String>);
 
 impl LocalPath {
+    /// Parses the `/`-joined form produced by `Display`. Needs a host and a
+    /// file name.
+    pub fn parse(joined: &str) -> Option<Self> {
+        let segments: Vec<String> = joined.split('/').map(str::to_owned).collect();
+        (segments.len() >= 2 && segments.iter().all(|s| !s.is_empty())).then_some(Self(segments))
+    }
+
     pub fn segments(&self) -> &[String] {
         &self.0
     }
@@ -155,6 +162,12 @@ impl PathAllocator {
         }
         self.taken.insert(path.collision_key(), url.clone());
         path
+    }
+
+    /// Marks `path` as belonging to `url`, for paths restored from an
+    /// earlier run.
+    pub fn reserve(&mut self, path: &LocalPath, url: &Url) {
+        self.taken.insert(path.collision_key(), url.clone());
     }
 }
 
@@ -303,13 +316,17 @@ fn sanitize(segment: &str) -> String {
 
 /// FNV-1a: tiny, dependency-free and stable across versions and platforms,
 /// which is all a file-name disambiguator needs.
-fn hash_hex(input: &str, len: usize) -> String {
+pub(crate) fn fnv1a(input: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in input.bytes() {
-        hash ^= u64::from(byte);
+    for byte in input {
+        hash ^= u64::from(*byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    let hex = format!("{hash:016x}");
+    hash
+}
+
+pub(crate) fn hash_hex(input: &str, len: usize) -> String {
+    let hex = format!("{:016x}", fnv1a(input.as_bytes()));
     hex[..len.min(16)].to_owned()
 }
 

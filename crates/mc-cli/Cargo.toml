@@ -10,17 +10,26 @@ license.workspace = true
 name = "mistercopy"
 path = "src/main.rs"
 
+[features]
+# Chromium via Playwright: `--requester playwright` and `auto`. Its build
+# fetches the Playwright driver, so it is opt-in.
+browser = ["dep:mc-requester-playwright"]
+
 [dependencies]
 clap.workspace = true
 mc-core.workspace = true
 mc-requester.workspace = true
+mc-requester-playwright = { workspace = true, optional = true }
 mc-requester-wreq.workspace = true
+mc-store.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
 mc-extract.workspace = true
 mc-fixtures.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["process"] }
 

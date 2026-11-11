@@ -13,6 +13,8 @@ mock = []
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+cookie.workspace = true
+cookie_store.workspace = true
 http.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -39,5 +39,10 @@ jobs:
       - if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1
       - uses: Swatinem/rust-cache@v2
+      # Without default features too, so the lean build stays honest.
+      - run: cargo clippy --workspace --all-targets
       - run: cargo clippy --workspace --all-targets --all-features
+      # The browser tests skip without Chromium; give Linux one so they run.
+      - if: runner.os == 'Linux'
+        run: cargo run -q -p mc-cli --features browser -- browsers install
       - run: cargo test --workspace --all-features

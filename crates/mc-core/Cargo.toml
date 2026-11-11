@@ -7,11 +7,16 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+base64.workspace = true
+httpdate.workspace = true
 mc-extract.workspace = true
 mc-requester.workspace = true
 mime_guess.workspace = true
 percent-encoding.workspace = true
 regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+texting_robots.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 unicode-normalization.workspace = true

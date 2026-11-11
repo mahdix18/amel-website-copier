@@ -13,28 +13,39 @@ mc-core = { path = "crates/mc-core" }
 mc-extract = { path = "crates/mc-extract" }
 mc-fixtures = { path = "fixtures" }
 mc-requester = { path = "crates/mc-requester" }
+mc-requester-playwright = { path = "crates/mc-requester-playwright" }
 mc-requester-wreq = { path = "crates/mc-requester-wreq" }
+mc-store = { path = "crates/mc-store" }
 
 anyhow = "1.0.104"
 async-trait = "0.1.92"
 axum = "0.8.9"
+base64 = "0.23.1"
 bytes = "1.12.1"
 clap = { version = "4.6.7", features = ["derive"] }
+cookie = "0.18.2"
+cookie_store = { version = "0.22.1", default-features = false }
 encoding_rs = "0.8.35"
+flate2 = "1.1.11"
 futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 http = "1.5.0"
+httpdate = "1.0.3"
 lol_html = "3.0.3"
 mime_guess = "2.0.5"
 percent-encoding = "2.3.2"
+# Pre-1.0 and its build script fetches a matching driver; pin exactly.
+playwright-rs = "=0.20.1"
 regex = "1.13.1"
+rusqlite = { version = "0.42.0", features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tempfile = "3.27.0"
+texting_robots = "0.2.2"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "net", "signal", "sync", "time", "fs"] }
 tower-http = { version = "0.7.1", features = ["fs"] }
 unicode-normalization = "0.1.26"
-url = "2.5.8"
+url = { version = "2.5.8", features = ["serde"] }
 # wreq's versioning has jumped between schemes; pin exactly and upgrade deliberately.
 wreq = { version = "=6.0.0-rc.31", features = ["gzip", "brotli", "zstd", "deflate", "stream"] }
 wreq-util = { version = "=3.0.0-rc.14", features = ["emulation-serde"] }

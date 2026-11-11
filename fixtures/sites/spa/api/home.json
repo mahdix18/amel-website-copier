@@ -1,0 +1,5 @@
+{
+  "title": "Welcome home",
+  "body": "This text only exists after JavaScript fetched it from /api/home.json.",
+  "images": ["/img/lazy-1.svg", "/img/lazy-2.svg"]
+}

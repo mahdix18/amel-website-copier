@@ -48,8 +48,18 @@ fn site() -> MockRequester {
 fn config(out: &std::path::Path) -> CrawlConfig {
     let mut config = CrawlConfig::new(url("https://site.test/"), out);
     config.per_host_delay = Duration::ZERO;
+    config.retry_base_delay = Duration::from_millis(1);
     config.rules = vec![Rule::new("/admin/", RuleAction::Exclude).unwrap()];
     config
+}
+
+/// Calls other than robots.txt.
+fn page_calls(requester: &MockRequester) -> Vec<Url> {
+    requester
+        .calls()
+        .into_iter()
+        .filter(|u| u.path() != "/robots.txt")
+        .collect()
 }
 
 fn read(out: &std::path::Path, rel: &str) -> String {
@@ -159,7 +169,7 @@ async fn url_limit_caps_fetches() {
     config.concurrency = 1;
     let requester = Arc::new(site());
     let summary = Crawler::new(config, requester.clone()).run().await.unwrap();
-    assert_eq!(requester.calls().len(), 3);
+    assert_eq!(page_calls(&requester).len(), 3);
     assert!(summary.skipped > 0);
 }
 

@@ -10,14 +10,18 @@
 //! status code. [`FetchError`] is reserved for failures where no usable
 //! response arrived, so the crawler alone decides what a 404 or 503 means.
 
+mod cookies;
 mod error;
+mod hybrid;
 #[cfg(feature = "mock")]
 pub mod mock;
 mod registry;
 mod requester;
 mod types;
 
+pub use cookies::{CookieFileError, CookieJar};
 pub use error::FetchError;
+pub use hybrid::{AUTO_ID, HybridRequester, needs_browser};
 pub use registry::{RegistryError, RequesterInfo, RequesterRegistry};
 pub use requester::{BuildError, Capabilities, Requester, RequesterFactory, SharedResources};
 pub use types::{

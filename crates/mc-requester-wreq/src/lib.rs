@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use futures_util::StreamExt;
 use mc_requester::{
-    BuildError, Capabilities, FetchContext, FetchError, FetchRequest, FetchResponse, Redirect,
-    Requester, RequesterFactory, SharedResources, Url, async_trait, header,
+    BuildError, Capabilities, CookieJar, FetchContext, FetchError, FetchRequest, FetchResponse,
+    Redirect, Requester, RequesterFactory, SharedResources, Url, async_trait, header,
 };
 use serde::Deserialize;
 use wreq_util::{Emulation, Platform, Profile};
@@ -31,8 +31,8 @@ pub struct WreqConfig {
     /// `windows`, `macos`, `linux`, `android` or `ios`. Defaults to the profile's own.
     pub platform: Option<Platform>,
     pub max_redirects: usize,
-    /// Responses larger than this fail with `TooLarge` instead of filling memory.
-    pub max_body_bytes: u64,
+    /// Overrides the crawl-wide response size limit for this requester.
+    pub max_body_bytes: Option<u64>,
 }
 
 impl Default for WreqConfig {
@@ -41,7 +41,7 @@ impl Default for WreqConfig {
             profile: DEFAULT_PROFILE,
             platform: None,
             max_redirects: 10,
-            max_body_bytes: 512 * 1024 * 1024,
+            max_body_bytes: None,
         }
     }
 }
@@ -90,6 +90,8 @@ fn build_error(message: String) -> BuildError {
 pub struct WreqRequester {
     client: wreq::Client,
     config: WreqConfig,
+    max_body_bytes: u64,
+    cookies: Arc<CookieJar>,
 }
 
 impl WreqRequester {
@@ -112,9 +114,22 @@ impl WreqRequester {
             builder = builder.proxy(proxy);
         }
         let client = builder.build().map_err(|e| build_error(e.to_string()))?;
-        Ok(Self { client, config })
+        Ok(Self {
+            client,
+            max_body_bytes: config.max_body_bytes.unwrap_or(shared.max_body_bytes),
+            config,
+            cookies: Arc::clone(&shared.cookies),
+        })
     }
 }
+
+/// Headers that carry credentials and must not follow a redirect to
+/// another origin.
+const CREDENTIAL_HEADERS: [header::HeaderName; 3] = [
+    header::AUTHORIZATION,
+    header::PROXY_AUTHORIZATION,
+    header::COOKIE,
+];
 
 #[async_trait]
 impl Requester for WreqRequester {
@@ -133,6 +148,7 @@ impl Requester for WreqRequester {
     ) -> Result<FetchResponse, FetchError> {
         let mut url = request.url.clone();
         let mut redirects = Vec::new();
+        let mut headers = request.headers.clone();
 
         loop {
             if !matches!(url.scheme(), "http" | "https") {
@@ -141,7 +157,12 @@ impl Requester for WreqRequester {
             let mut builder = self
                 .client
                 .request(request.method.clone(), url.as_str())
-                .headers(request.headers.clone());
+                .headers(headers.clone());
+            if let Some(cookies) = self.cookies.header_for(&url)
+                && !headers.contains_key(header::COOKIE)
+            {
+                builder = builder.header(header::COOKIE, cookies);
+            }
             if let Some(timeout) = request.timeout {
                 builder = builder.timeout(timeout);
             }
@@ -164,6 +185,7 @@ impl Requester for WreqRequester {
 
             let response = builder.send().await.map_err(fetch_error)?;
             let status = response.status();
+            self.cookies.store_from(&url, response.headers());
 
             if status.is_redirection() && status != mc_requester::StatusCode::NOT_MODIFIED {
                 let location = response
@@ -177,6 +199,11 @@ impl Requester for WreqRequester {
                             format!("more than {} redirects", self.config.max_redirects).into(),
                         ));
                     }
+                    if next.origin() != url.origin() {
+                        for name in &CREDENTIAL_HEADERS {
+                            headers.remove(name);
+                        }
+                    }
                     redirects.push(Redirect {
                         from: url.clone(),
                         to: next.clone(),
@@ -188,7 +215,7 @@ impl Requester for WreqRequester {
             }
 
             let headers = response.headers().clone();
-            let limit = self.config.max_body_bytes;
+            let limit = self.max_body_bytes;
             if response.content_length().is_some_and(|len| len > limit) {
                 return Err(FetchError::TooLarge { limit });
             }

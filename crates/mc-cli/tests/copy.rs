@@ -2,78 +2,58 @@
 
 #![allow(clippy::unwrap_used)]
 
-use std::path::{Path, PathBuf};
+mod common;
+
+use std::path::PathBuf;
+use std::process::Output;
 use std::time::Duration;
 
-use mc_core::{CrawlConfig, CrawlSummary, Crawler};
-use mc_extract::{Url, extract_css, extract_html};
+use common::{assert_links_resolve_offline, files, host_dir, tree};
+use mc_core::{
+    CrawlConfig, CrawlEvent, CrawlStatus, CrawlSummary, Crawler, REPORT_HTML, REPORT_JSON,
+};
 use mc_fixtures::{FixtureServer, Site};
-use mc_requester::{RequesterFactory, SharedResources};
+use mc_requester::{Requester, RequesterFactory, SharedResources, Url};
 use mc_requester_wreq::WreqFactory;
+use mc_store::SqliteStore;
+use std::sync::Arc;
+
+fn requester() -> Arc<dyn Requester> {
+    WreqFactory
+        .build(&serde_json::json!({}), &SharedResources::default())
+        .unwrap()
+}
+
+fn config(seed: Url, out: &std::path::Path) -> CrawlConfig {
+    let mut config = CrawlConfig::new(seed, out);
+    config.per_host_delay = Duration::ZERO;
+    config.retry_base_delay = Duration::from_millis(10);
+    config
+}
 
 async fn copy(site: Site) -> (tempfile::TempDir, PathBuf, CrawlSummary) {
     let server = FixtureServer::start(site).await.unwrap();
     let out = tempfile::tempdir().unwrap();
-    let requester = WreqFactory
-        .build(&serde_json::json!({}), &SharedResources::default())
+    let summary = Crawler::new(config(server.base_url(), out.path()), requester())
+        .run()
+        .await
         .unwrap();
-    let mut config = CrawlConfig::new(server.base_url(), out.path());
-    config.per_host_delay = Duration::ZERO;
-    let summary = Crawler::new(config, requester).run().await.unwrap();
-    let root = out
-        .path()
-        .join(format!("127.0.0.1_{}", server.addr().port()));
+    let root = host_dir(out.path(), server.addr().port());
     server.stop().await.unwrap();
     (out, root, summary)
 }
 
-fn files(dir: &Path) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            found.extend(files(&path));
-        } else {
-            found.push(path);
-        }
-    }
-    found
-}
-
-/// Every reference in every saved document either resolves to a file on
-/// disk or points at a site other than the one copied.
-fn assert_links_resolve_offline(root: &Path) {
-    let mut broken = Vec::new();
-    for file in files(root) {
-        let name = file.file_name().unwrap().to_string_lossy().into_owned();
-        assert!(
-            !name.ends_with(".mc-tmp"),
-            "leftover temp file {}",
-            file.display()
-        );
-        let base = Url::from_file_path(&file).unwrap();
-        let bytes = std::fs::read(&file).unwrap();
-        let links = match file.extension().and_then(|e| e.to_str()) {
-            Some("html") => extract_html(&bytes, None, &base).unwrap(),
-            Some("css") => extract_css(&String::from_utf8_lossy(&bytes), &base),
-            _ => continue,
-        };
-        for link in links {
-            let ok = match link.url.scheme() {
-                "file" => link.url.to_file_path().is_ok_and(|p| p.is_file()),
-                _ => link.url.host_str() != Some("127.0.0.1"),
-            };
-            if !ok {
-                broken.push(format!("{} -> {}", file.display(), link.url));
-            }
-        }
-    }
-    assert!(broken.is_empty(), "broken links:\n{}", broken.join("\n"));
+async fn mistercopy(args: &[&str]) -> Output {
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_mistercopy"))
+        .args(args)
+        .output()
+        .await
+        .unwrap()
 }
 
 #[tokio::test]
 async fn copies_the_static_blog() {
-    let (_out, root, summary) = copy(Site::StaticBlog).await;
+    let (out, root, summary) = copy(Site::StaticBlog).await;
     assert!(summary.failed.is_empty(), "{:?}", summary.failed);
 
     for file in [
@@ -119,7 +99,12 @@ async fn copies_the_static_blog() {
     );
     assert!(index.contains(r#"href="https://example.com/""#), "{index}");
 
-    assert_links_resolve_offline(&root);
+    assert_links_resolve_offline(&root, true);
+    assert!(out.path().join(REPORT_HTML).is_file());
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.path().join(REPORT_JSON)).unwrap()).unwrap();
+    assert_eq!(report["status"], "complete");
+    assert_eq!(report["totals"]["saved"], summary.saved);
 }
 
 #[tokio::test]
@@ -129,62 +114,234 @@ async fn copies_the_ua_gated_site() {
     for file in ["index.html", "page2.html", "style.css"] {
         assert!(root.join(file).is_file(), "missing {file}");
     }
-    assert_links_resolve_offline(&root);
+    assert_links_resolve_offline(&root, true);
+}
+
+#[tokio::test]
+async fn interrupted_copy_resumes_to_the_same_tree() {
+    let server = FixtureServer::start(Site::StaticBlog).await.unwrap();
+    let full = tempfile::tempdir().unwrap();
+    Crawler::new(config(server.base_url(), full.path()), requester())
+        .run()
+        .await
+        .unwrap();
+
+    let out = tempfile::tempdir().unwrap();
+    let mut first = config(server.base_url(), out.path());
+    first.concurrency = 1;
+    let crawler =
+        Crawler::new(first, requester()).with_store(SqliteStore::open(out.path()).unwrap());
+    let stop = crawler.stop_handle();
+    let mut events = crawler.subscribe();
+    let stopper = tokio::spawn(async move {
+        let mut saved = 0;
+        while let Ok(event) = events.recv().await {
+            if matches!(event, CrawlEvent::Saved { .. }) {
+                saved += 1;
+                if saved == 3 {
+                    stop.stop();
+                }
+            }
+        }
+    });
+    let partial = crawler.run().await.unwrap();
+    stopper.await.unwrap();
+    assert!(partial.stopped.is_some());
+    assert!(partial.saved < 11, "stopped early: {}", partial.saved);
+    assert_eq!(
+        SqliteStore::open(out.path()).unwrap().status().unwrap(),
+        Some(CrawlStatus::Stopped)
+    );
+
+    // A new process would reopen the same state file.
+    let resumed = Crawler::new(config(server.base_url(), out.path()), requester())
+        .with_store(SqliteStore::open(out.path()).unwrap())
+        .run()
+        .await
+        .unwrap();
+    assert!(resumed.stopped.is_none());
+    assert!(resumed.failed.is_empty(), "{:?}", resumed.failed);
+    assert_eq!(tree(out.path()), tree(full.path()));
+    server.stop().await.unwrap();
 }
 
 #[tokio::test]
 async fn cli_copies_and_reports_exit_codes() {
     let server = FixtureServer::start(Site::StaticBlog).await.unwrap();
     let out = tempfile::tempdir().unwrap();
-    let bin = env!("CARGO_BIN_EXE_mistercopy");
+    let dir = out.path().to_str().unwrap();
+    let url = server.base_url();
 
-    let status = tokio::process::Command::new(bin)
-        .args([
-            "copy",
-            server.base_url().as_str(),
-            "--delay-ms",
-            "0",
-            "--quiet",
-            "-o",
-        ])
-        .arg(out.path())
-        .status()
-        .await
-        .unwrap();
-    assert!(status.success());
-    let root = out
-        .path()
-        .join(format!("127.0.0.1_{}", server.addr().port()));
-    assert!(root.join("index.html").is_file());
+    let first = mistercopy(&[
+        "copy",
+        url.as_str(),
+        "--delay-ms",
+        "0",
+        "--quiet",
+        "-o",
+        dir,
+    ])
+    .await;
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        host_dir(out.path(), server.addr().port())
+            .join("index.html")
+            .is_file()
+    );
 
-    let bad_regex = tokio::process::Command::new(bin)
-        .args(["copy", server.base_url().as_str(), "--exclude", "(", "-o"])
-        .arg(out.path())
-        .output()
-        .await
-        .unwrap();
+    // A finished copy isn't overwritten by accident.
+    let again = mistercopy(&[
+        "copy",
+        url.as_str(),
+        "--delay-ms",
+        "0",
+        "--quiet",
+        "-o",
+        dir,
+    ])
+    .await;
+    assert_eq!(again.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&again.stderr).contains("mistercopy update"));
+    let fresh = mistercopy(&[
+        "copy",
+        url.as_str(),
+        "--delay-ms",
+        "0",
+        "--quiet",
+        "--fresh",
+        "-o",
+        dir,
+    ])
+    .await;
+    assert!(fresh.status.success());
+
+    let bad_regex =
+        mistercopy(&["copy", url.as_str(), "--exclude", "(", "--fresh", "-o", dir]).await;
     assert_eq!(bad_regex.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&bad_regex.stderr).contains("invalid regex"));
 
-    let bad_profile = tokio::process::Command::new(bin)
-        .args([
-            "copy",
-            server.base_url().as_str(),
-            "--profile",
-            "netscape_4",
-            "-o",
-        ])
-        .arg(out.path())
-        .output()
-        .await
-        .unwrap();
+    let bad_profile = mistercopy(&[
+        "copy",
+        url.as_str(),
+        "--profile",
+        "netscape_4",
+        "--fresh",
+        "-o",
+        dir,
+    ])
+    .await;
     assert_eq!(bad_profile.status.code(), Some(2));
 
-    let listed = tokio::process::Command::new(bin)
-        .args(["requesters", "list"])
-        .output()
-        .await
-        .unwrap();
+    let bad_auth = mistercopy(&[
+        "copy",
+        url.as_str(),
+        "--auth",
+        "nonsense",
+        "--fresh",
+        "-o",
+        dir,
+    ])
+    .await;
+    assert_eq!(bad_auth.status.code(), Some(2));
+
+    let listed = mistercopy(&["requesters", "list"]).await;
     assert!(String::from_utf8_lossy(&listed.stdout).contains("wreq"));
+    server.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn cli_resumes_and_updates() {
+    let server = FixtureServer::start(Site::StaticBlog).await.unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let dir = out.path().to_str().unwrap();
+    let url = server.base_url();
+
+    // A zero time limit stops before the first request.
+    let stopped = mistercopy(&[
+        "copy",
+        url.as_str(),
+        "--delay-ms",
+        "0",
+        "--max-time-secs",
+        "0",
+        "-o",
+        dir,
+    ])
+    .await;
+    assert_eq!(
+        stopped.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
+    assert!(String::from_utf8_lossy(&stopped.stderr).contains("mistercopy resume"));
+    let update_too_early = mistercopy(&["update", dir]).await;
+    assert_eq!(update_too_early.status.code(), Some(2));
+
+    // Saved options, limits included, apply to every run: a zero time
+    // limit stops the resumed run too.
+    let resumed = mistercopy(&["resume", dir]).await;
+    assert_eq!(resumed.status.code(), Some(3));
+
+    let finished = mistercopy(&[
+        "copy",
+        url.as_str(),
+        "--delay-ms",
+        "0",
+        "--quiet",
+        "--fresh",
+        "-o",
+        dir,
+    ])
+    .await;
+    assert!(finished.status.success());
+    let done = mistercopy(&["resume", dir]).await;
+    assert!(done.status.success());
+    assert!(String::from_utf8_lossy(&done.stdout).contains("already complete"));
+
+    let updated = mistercopy(&["update", dir]).await;
+    let stdout = String::from_utf8_lossy(&updated.stdout);
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    assert!(stdout.contains("same    "), "{stdout}");
+    assert!(stdout.contains("unchanged"), "{stdout}");
+    assert_links_resolve_offline(&host_dir(out.path(), server.addr().port()), true);
+
+    let missing = mistercopy(&["resume", out.path().join("nowhere").to_str().unwrap()]).await;
+    assert_eq!(missing.status.code(), Some(2));
+    server.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn cli_scan_saves_only_the_report() {
+    let server = FixtureServer::start(Site::StaticBlog).await.unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let report = out.path().join("scan.json");
+    let scanned = mistercopy(&[
+        "scan",
+        server.base_url().as_str(),
+        "--delay-ms",
+        "0",
+        "--quiet",
+        "--report",
+        report.to_str().unwrap(),
+    ])
+    .await;
+    assert!(
+        scanned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&scanned.stderr)
+    );
+    assert_eq!(files(out.path()), std::slice::from_ref(&report));
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&report).unwrap()).unwrap();
+    assert!(json["totals"]["saved"].as_u64().unwrap() >= 10, "{json}");
+    assert!(String::from_utf8_lossy(&scanned.stdout).contains("Checked"));
     server.stop().await.unwrap();
 }

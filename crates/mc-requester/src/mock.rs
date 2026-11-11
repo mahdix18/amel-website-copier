@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use bytes::Bytes;
+use http::header::HeaderName;
 use http::{HeaderMap, HeaderValue, StatusCode, header};
 use url::Url;
 
@@ -21,7 +22,7 @@ const MAX_REDIRECTS: usize = 10;
 pub enum MockRoute {
     Respond {
         status: StatusCode,
-        content_type: Option<String>,
+        headers: HeaderMap,
         body: Bytes,
     },
     Redirect {
@@ -37,9 +38,14 @@ impl MockRoute {
     }
 
     pub fn respond(status: StatusCode, content_type: &str, body: impl Into<Bytes>) -> Self {
+        Self::status(status, body).with_header(header::CONTENT_TYPE, content_type)
+    }
+
+    /// A response with no `Content-Type`.
+    pub fn status(status: StatusCode, body: impl Into<Bytes>) -> Self {
         Self::Respond {
             status,
-            content_type: Some(content_type.to_owned()),
+            headers: HeaderMap::new(),
             body: body.into(),
         }
     }
@@ -49,6 +55,17 @@ impl MockRoute {
             status: StatusCode::FOUND,
             to,
         }
+    }
+
+    /// Adds a response header. Ignored on redirects and failures, and when
+    /// the value isn't a valid header value.
+    pub fn with_header(mut self, name: HeaderName, value: &str) -> Self {
+        if let Self::Respond { headers, .. } = &mut self
+            && let Ok(value) = HeaderValue::from_str(value)
+        {
+            headers.append(name, value);
+        }
+        self
     }
 }
 
@@ -73,8 +90,10 @@ impl MockFailure {
 #[derive(Debug, Default)]
 pub struct MockRequester {
     capabilities: Capabilities,
-    routes: HashMap<Url, MockRoute>,
-    calls: Mutex<Vec<Url>>,
+    /// The nth request for a URL gets the nth route; the last one repeats.
+    routes: HashMap<Url, Vec<MockRoute>>,
+    hits: Mutex<HashMap<Url, usize>>,
+    requests: Mutex<Vec<FetchRequest>>,
 }
 
 impl MockRequester {
@@ -87,17 +106,39 @@ impl MockRequester {
         self
     }
 
-    pub fn route(mut self, url: Url, route: MockRoute) -> Self {
-        self.routes.insert(url, route);
+    pub fn route(self, url: Url, route: MockRoute) -> Self {
+        self.route_sequence(url, vec![route])
+    }
+
+    /// Serves `routes` to successive requests for `url`, repeating the last.
+    pub fn route_sequence(mut self, url: Url, routes: Vec<MockRoute>) -> Self {
+        self.routes.insert(url, routes);
         self
     }
 
     /// Every URL passed to `fetch`, in call order (redirect hops excluded).
     pub fn calls(&self) -> Vec<Url> {
-        self.calls
+        self.requests()
+            .into_iter()
+            .map(|request| request.url)
+            .collect()
+    }
+
+    /// Every request passed to `fetch`, in call order.
+    pub fn requests(&self) -> Vec<FetchRequest> {
+        self.requests
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    fn next_route(&self, url: &Url) -> Option<MockRoute> {
+        let routes = self.routes.get(url)?;
+        let mut hits = self.hits.lock().unwrap_or_else(PoisonError::into_inner);
+        let hit = hits.entry(url.clone()).or_default();
+        let route = routes.get(*hit).or_else(|| routes.last()).cloned();
+        *hit += 1;
+        route
     }
 }
 
@@ -116,43 +157,22 @@ impl Requester for MockRequester {
         request: FetchRequest,
         _context: &FetchContext,
     ) -> Result<FetchResponse, FetchError> {
-        self.calls
+        self.requests
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push(request.url.clone());
+            .push(request.clone());
 
         let mut url = request.url;
         let mut redirects = Vec::new();
         loop {
-            match self.routes.get(&url) {
-                None => {
-                    let mut response = FetchResponse::new(
-                        url,
-                        StatusCode::NOT_FOUND,
-                        HeaderMap::new(),
-                        Body::empty(),
-                    );
-                    response.redirects = redirects;
-                    return Ok(response);
-                }
+            let (status, headers, body) = match self.next_route(&url) {
+                None => (StatusCode::NOT_FOUND, HeaderMap::new(), Bytes::new()),
                 Some(MockRoute::Fail(failure)) => return Err(failure.to_error()),
                 Some(MockRoute::Respond {
                     status,
-                    content_type,
+                    headers,
                     body,
-                }) => {
-                    let mut headers = HeaderMap::new();
-                    if let Some(value) = content_type
-                        .as_deref()
-                        .and_then(|ct| HeaderValue::from_str(ct).ok())
-                    {
-                        headers.insert(header::CONTENT_TYPE, value);
-                    }
-                    let mut response =
-                        FetchResponse::new(url, *status, headers, Body::Bytes(body.clone()));
-                    response.redirects = redirects;
-                    return Ok(response);
-                }
+                }) => (status, headers, body),
                 Some(MockRoute::Redirect { status, to }) => {
                     if redirects.len() == MAX_REDIRECTS {
                         return Err(FetchError::Other(
@@ -162,11 +182,15 @@ impl Requester for MockRequester {
                     redirects.push(Redirect {
                         from: url,
                         to: to.clone(),
-                        status: *status,
+                        status,
                     });
-                    url = to.clone();
+                    url = to;
+                    continue;
                 }
-            }
+            };
+            let mut response = FetchResponse::new(url, status, headers, Body::Bytes(body));
+            response.redirects = redirects;
+            return Ok(response);
         }
     }
 }

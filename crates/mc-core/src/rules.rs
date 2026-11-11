@@ -59,6 +59,33 @@ pub enum SkipReason {
     OutOfScope,
     TooDeep,
     UrlLimit,
+    /// Disallowed by the site's robots.txt.
+    Robots,
+}
+
+impl SkipReason {
+    pub const ALL: [SkipReason; 5] = [
+        Self::Excluded,
+        Self::OutOfScope,
+        Self::TooDeep,
+        Self::UrlLimit,
+        Self::Robots,
+    ];
+
+    /// A stable name for storage and reports.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Excluded => "excluded",
+            Self::OutOfScope => "out-of-scope",
+            Self::TooDeep => "too-deep",
+            Self::UrlLimit => "url-limit",
+            Self::Robots => "robots",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|reason| reason.as_str() == name)
+    }
 }
 
 impl std::fmt::Display for SkipReason {
@@ -68,6 +95,7 @@ impl std::fmt::Display for SkipReason {
             Self::OutOfScope => "outside the crawl scope",
             Self::TooDeep => "deeper than the depth limit",
             Self::UrlLimit => "URL limit reached",
+            Self::Robots => "disallowed by robots.txt",
         })
     }
 }

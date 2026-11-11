@@ -1,17 +1,20 @@
 //! Local websites for MisterCopy's tests, served over real HTTP on loopback.
 //!
 //! Each [`Site`] is a directory under `fixtures/sites/` exercising one class of
-//! problem. More sites (`spa-react`, `auth`, `hostile`) arrive with the
-//! milestones that need them.
+//! problem. More sites (`spa-react`, `auth`) arrive with the milestones that
+//! need them.
+
+mod hostile;
 
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use axum::Router;
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
@@ -19,7 +22,7 @@ use axum::routing::get;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,15 +34,23 @@ pub enum Site {
     /// headers only; a TLS-fingerprint check would need a TLS server that
     /// inspects the ClientHello.
     UaGate,
+    /// Redirect loops, infinite pages, broken encodings and bodies, rate
+    /// limits, huge and slow responses, illegal file names, robots.txt.
+    Hostile,
+    /// A JavaScript single-page app: client-side routes, content fetched
+    /// from `/api`, and images that load only when scrolled into view.
+    Spa,
 }
 
 impl Site {
-    pub const ALL: &[Site] = &[Site::StaticBlog, Site::UaGate];
+    pub const ALL: &[Site] = &[Site::StaticBlog, Site::UaGate, Site::Hostile, Site::Spa];
 
     pub fn name(self) -> &'static str {
         match self {
             Site::StaticBlog => "static-blog",
             Site::UaGate => "ua-gate",
+            Site::Hostile => "hostile",
+            Site::Spa => "spa",
         }
     }
 
@@ -93,7 +104,25 @@ pub fn router(site: Site) -> Router {
         Site::UaGate => Router::new()
             .fallback_service(files)
             .layer(middleware::from_fn(require_browser)),
+        Site::Hostile => hostile::router(),
+        // Unknown paths are client-side routes: serve the app shell.
+        Site::Spa => Router::new().fallback_service(
+            ServeDir::new(site.root()).fallback(ServeFile::new(site.root().join("index.html"))),
+        ),
     }
+}
+
+type RequestLog = Arc<Mutex<Vec<String>>>;
+
+async fn log_request(State(log): State<RequestLog>, request: Request, next: Next) -> Response {
+    let target = request
+        .uri()
+        .path_and_query()
+        .map_or_else(|| request.uri().path().to_owned(), ToString::to_string);
+    log.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(target);
+    next.run(request).await
 }
 
 async fn require_browser(request: Request, next: Next) -> Response {
@@ -119,6 +148,7 @@ fn looks_like_browser(headers: &HeaderMap) -> bool {
 #[derive(Debug)]
 pub struct FixtureServer {
     addr: SocketAddr,
+    requests: RequestLog,
     shutdown: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<io::Result<()>>>,
 }
@@ -133,8 +163,13 @@ impl FixtureServer {
         let listener = TcpListener::bind(addr).await?;
         let addr = listener.local_addr()?;
         let (shutdown, signal) = oneshot::channel::<()>();
+        let requests = RequestLog::default();
+        let app = router(site).layer(middleware::from_fn_with_state(
+            Arc::clone(&requests),
+            log_request,
+        ));
         let task = tokio::spawn(async move {
-            axum::serve(listener, router(site))
+            axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     // Either a stop request or the sender being dropped.
                     let _ = signal.await;
@@ -143,6 +178,7 @@ impl FixtureServer {
         });
         Ok(Self {
             addr,
+            requests,
             shutdown: Some(shutdown),
             task: Some(task),
         })
@@ -150,6 +186,14 @@ impl FixtureServer {
 
     pub fn addr(&self) -> SocketAddr {
         self.addr
+    }
+
+    /// Path and query of every request served so far, in arrival order.
+    pub fn requests(&self) -> Vec<String> {
+        self.requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub fn base_url(&self) -> Url {

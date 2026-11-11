@@ -200,6 +200,7 @@ Tests: golden tables plus `proptest` properties (always valid on Windows, same o
 
 ### 4.9 Rewriter
 - `lol_html` streaming rewrite of every extracted reference to a **relative, percent-encoded** local path. CSS is rewritten through the CSS extractor's spans.
+- Rewriting always starts from a pristine copy of each document kept in `.mistercopy/originals/`. That makes it safe to run again after a resume, and lets `update` crawl onward from pages the server reports unchanged (304).
 - References that are out of scope or excluded stay absolute (or point to a local "not copied" stub page).
 - Removes `<base>`, `integrity=` on modified resources and CSP meta tags that would block local files.
 - **Offline replay shim (experimental, M5):** for pages fetched with Playwright, an injected script serves recorded `fetch`/XHR responses from a local manifest, so client-side data loads work offline.
@@ -281,6 +282,19 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
 | **M4** GUI | gpui-kit app: projects, editor with rule tester, live crawl view, results and link map | Full copy of every fixture driven from the GUI; startup and memory targets met |
 | **M5** Archival & SPA replay | WARC/zip output, offline replay shim, link-map export | SPA fixture data views work offline; WARC validates with `warcio` |
 | **M6** Distribution | Release binaries (cargo-dist), signed installers (MSI, DMG, AppImage/Flatpak), Homebrew/Scoop/winget | One-command install on each OS |
+
+**Progress (2026-11-11):**
+
+- **M0–M2 done.**
+- **M3 partly done.** Done so far:
+  - the Playwright requester, behind the `browser` feature, using an already installed Chromium when there is one
+  - network capture and auto-scroll
+  - the `auto` hybrid, which also falls back to the browser on a 403
+  - `browsers status|install`
+  - the `spa` fixture (vanilla JavaScript rather than React)
+- **Still open in M3:**
+  - scripted and interactive login, with the `auth` fixture
+  - choosing a requester per rule (one requester per crawl for now)
 
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.

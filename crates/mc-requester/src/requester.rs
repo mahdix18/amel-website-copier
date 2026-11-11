@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde::Serialize;
 use url::Url;
 
-use crate::{FetchContext, FetchError, FetchRequest, FetchResponse};
+use crate::{CookieJar, FetchContext, FetchError, FetchRequest, FetchResponse};
 
 /// What a requester can do, so the crawler and UI can pick one per URL.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -42,6 +42,10 @@ pub trait Requester: Send + Sync + 'static {
 pub struct SharedResources {
     pub default_timeout: Duration,
     pub proxy: Option<Url>,
+    /// Responses larger than this fail with `FetchError::TooLarge`.
+    pub max_body_bytes: u64,
+    /// One session for every requester, so a login done in one carries over.
+    pub cookies: Arc<CookieJar>,
 }
 
 impl Default for SharedResources {
@@ -49,6 +53,8 @@ impl Default for SharedResources {
         Self {
             default_timeout: Duration::from_secs(30),
             proxy: None,
+            max_body_bytes: 512 * 1024 * 1024,
+            cookies: Arc::new(CookieJar::new()),
         }
     }
 }
