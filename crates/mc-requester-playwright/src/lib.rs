@@ -154,7 +154,7 @@ pub fn installed_chromium() -> Vec<PathBuf> {
             Some((revision, entry.path()))
         })
         .collect();
-    builds.sort_by(|a, b| b.0.cmp(&a.0));
+    builds.sort_by_key(|(revision, _)| std::cmp::Reverse(*revision));
     builds
         .into_iter()
         .filter_map(|(_, dir)| chromium_executable(&dir))

@@ -1,0 +1,34 @@
+[package]
+name = "mc-gui"
+description = "The MisterCopy desktop app"
+version.workspace = true
+edition.workspace = true
+# GPUI needs a newer compiler than the library crates.
+rust-version = "1.95"
+license.workspace = true
+
+[[bin]]
+name = "mistercopy-gui"
+path = "src/main.rs"
+
+[features]
+# "Render JavaScript" option, through Chromium; see mc-cli's feature.
+browser = ["dep:mc-requester-playwright"]
+
+[dependencies]
+gpui-kit.workspace = true
+mc-core.workspace = true
+mc-requester.workspace = true
+mc-requester-playwright = { workspace = true, optional = true }
+mc-requester-wreq.workspace = true
+mc-store.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+mc-fixtures.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

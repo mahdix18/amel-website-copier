@@ -295,6 +295,16 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - `browsers status|install`
   - the `spa` fixture (vanilla JavaScript rather than React) and the `auth` fixture
 - **Deferred from M3:** choosing a requester per rule (one requester per crawl for now).
+- **M4 started:**
+  - `mistercopy-gui` (gpui-kit 0.9.1) with a copy form (address, folder, optional Render JavaScript), Copy and Stop, live counters and a log, and the summary with an Open report button
+  - copies resume automatically and share their state format with the CLI
+  - headless UI tests drive a full copy through the window
+- **Still open in M4:**
+  - the projects sidebar
+  - the project editor with the live rule tester
+  - the link-map view
+  - a command palette
+  - a check of the startup and memory targets
 
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.

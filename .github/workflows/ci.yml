@@ -31,6 +31,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # The version comes from rust-toolchain.toml.
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -38,6 +39,12 @@ jobs:
       # three runners; Windows also needs NASM for the assembly sources.
       - if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1
+      # GPUI (the desktop app) on Linux links against X11, Wayland and Vulkan.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev libasound2-dev
       - uses: Swatinem/rust-cache@v2
       # Without default features too, so the lean build stays honest.
       - run: cargo clippy --workspace --all-targets

@@ -2,7 +2,7 @@
 
 A lightweight website copier for offline browsing, written in Rust. See [PLAN.md](PLAN.md) for the design and milestones.
 
-**Status:** M3. MisterCopy copies sites through a browser-impersonating HTTP client and rewrites their links to work offline. It retries transient failures, respects robots.txt, can stop and resume, updates a copy by downloading only what changed, and writes a report. With the `browser` feature it also renders JavaScript-built pages in Chromium and can log in through a real browser. The native GUI (M4) is next.
+**Status:** M3. MisterCopy copies sites through a browser-impersonating HTTP client and rewrites their links to work offline. It retries transient failures, respects robots.txt, can stop and resume, updates a copy by downloading only what changed, and writes a report. With the `browser` feature it also renders JavaScript-built pages in Chromium and can log in through a real browser. A first version of the desktop app (M4) copies a site from a window.
 
 ## Usage
 
@@ -25,6 +25,18 @@ mistercopy scan https://example.com --report links.html   # audit only, saves no
 ```
 
 Press Ctrl-C once to stop after the requests in flight; progress is saved. Press it twice to quit at once.
+
+### Desktop app
+
+```bash
+cargo run --release -p mc-gui
+```
+
+Enter a site's address and a folder, then click **Copy**. The window shows each file as it arrives, counts what was saved and what failed, and opens the report when the copy is done. **Stop** saves progress; copying the same site into the same folder again continues where it stopped. Copies made in the app can also be resumed or updated with `mistercopy resume` and `mistercopy update`.
+
+Build with `--features browser` to add a **Render JavaScript** option, which uses `--requester auto`.
+
+On Linux the app needs the X11, Wayland and Vulkan development packages (`libxkbcommon-x11-dev libx11-xcb-dev libwayland-dev libvulkan-dev` on Debian/Ubuntu).
 
 ### JavaScript sites
 
@@ -119,6 +131,7 @@ Exit codes:
 | `crates/mc-core` | The crawler: rules, URL → file path mapping, retries, robots.txt, limits, link rewriting, reports |
 | `crates/mc-store` | Crawl state in SQLite, for resume and update |
 | `crates/mc-cli` | The `mistercopy` binary |
+| `crates/mc-gui` | The `mistercopy-gui` desktop app (gpui-kit) |
 | `fixtures` | Local test websites and the server that hosts them (`mc-fixtures`), including `hostile`, a site full of traps, and `spa`, a JavaScript app |
 
 ## Development
@@ -141,7 +154,7 @@ Serve a test site at http://127.0.0.1:8000/:
 cargo run -p mc-fixtures -- hostile
 ```
 
-The wreq requester builds BoringSSL, which needs `cmake`, `clang`/`libclang` and, on Windows, `nasm`. If you have libclang but bindgen can't find `stddef.h`, either install your distro's `clang` package or point bindgen at GCC's headers:
+The toolchain is pinned in `rust-toolchain.toml` (rustup installs it on first use; GPUI needs Rust 1.95 or newer). The wreq requester builds BoringSSL, which needs `cmake`, `clang`/`libclang` and, on Windows, `nasm`. If you have libclang but bindgen can't find `stddef.h`, either install your distro's `clang` package or point bindgen at GCC's headers:
 
 ```bash
 export BINDGEN_EXTRA_CLANG_ARGS="-I/usr/lib/gcc/x86_64-linux-gnu/13/include"
