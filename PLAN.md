@@ -323,7 +323,7 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - release profile (thin LTO, stripped): the app went from 71.2 MB to 43.1 MB, though the 71.2 MB build included browser support and the new one doesn't, so it isn't a like-for-like comparison; the CLI stayed about 13 MB
   - `scripts/package.sh` (archive plus SHA-256), checked locally: a 23.6 MB Linux tarball whose binaries run
   - a tag-triggered release workflow for all three OSes, not run yet because there's no remote
-  - a Dockerfile for the CLI, not built yet because it needs about 1.5 GB of base images
+  - a Dockerfile for the CLI, built and run locally: a 97.6 MB image that copied the static-blog fixture with exit code 0
 - **Still open in M6:**
   - signed installers (MSI, DMG, AppImage/Flatpak), which need signing identities
   - Homebrew, Scoop and winget manifests, which need published release URLs

@@ -26,6 +26,8 @@ docker build -t mistercopy .
 docker run --rm -v "$PWD/copies:/copies" mistercopy copy https://example.com -o /copies
 ```
 
+Add `--user "$(id -u):$(id -g)"` so the copied files belong to you rather than root. The image is about 100 MB and has no browser support.
+
 ## Usage
 
 ```bash
