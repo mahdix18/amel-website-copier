@@ -319,6 +319,16 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - WARC files are checked by the project's own reader (gzip framing, record lengths, ids), not yet by `warcio`.
   - Client-side routes still need `serve`: under `file://`, a path-routed app sees the file path as its route.
 
+- **M6 partly done:**
+  - release profile (thin LTO, stripped): the app went from 71.2 MB to 43.1 MB, though the 71.2 MB build included browser support and the new one doesn't, so it isn't a like-for-like comparison; the CLI stayed about 13 MB
+  - `scripts/package.sh` (archive plus SHA-256), checked locally: a 23.6 MB Linux tarball whose binaries run
+  - a tag-triggered release workflow for all three OSes, not run yet because there's no remote
+  - a Dockerfile for the CLI, not built yet because it needs about 1.5 GB of base images
+- **Still open in M6:**
+  - signed installers (MSI, DMG, AppImage/Flatpak), which need signing identities
+  - Homebrew, Scoop and winget manifests, which need published release URLs
+  - choosing a license: the manifests declare MIT OR Apache-2.0, but the repo has no LICENSE files
+
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.
 - **Playwright from Rust** still needs the Playwright driver plus Chromium (about 150 MB+ downloaded on demand). If that proves painful, `chromiumoxide` (pure-Rust CDP) is the drop-in alternative requester. The trait makes the swap cheap.

@@ -59,3 +59,10 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
+
+[profile.release]
+# Smaller, faster binaries for distribution. Unwinding stays on: the crawler
+# turns a panicking requester into a recorded failure instead of crashing.
+lto = "thin"
+codegen-units = 1
+strip = true

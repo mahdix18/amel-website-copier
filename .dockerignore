@@ -1,0 +1,5 @@
+# Keep the build context small: no build output, packages, copies or git.
+/target
+/dist
+/m
+.git

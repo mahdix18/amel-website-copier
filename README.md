@@ -4,6 +4,28 @@ A lightweight website copier for offline browsing, written in Rust. See [PLAN.md
 
 **Status:** M3. MisterCopy copies sites through a browser-impersonating HTTP client and rewrites their links to work offline. It retries transient failures, respects robots.txt, can stop and resume, updates a copy by downloading only what changed, and writes a report. With the `browser` feature it also renders JavaScript-built pages in Chromium and can log in through a real browser. The desktop app (M4) does all of this from a window, and copies can also be saved as WARC archives or zip files (M5).
 
+## Install
+
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. Each one has packages for Linux, macOS and Windows, with and without browser support, plus checksums. To build one for your own machine:
+
+```bash
+scripts/package.sh                   # dist/mistercopy-<version>-<target>.tar.gz
+```
+
+```bash
+FEATURES=browser scripts/package.sh  # with Chromium rendering
+```
+
+Or run the command-line tool in Docker:
+
+```bash
+docker build -t mistercopy .
+```
+
+```bash
+docker run --rm -v "$PWD/copies:/copies" mistercopy copy https://example.com -o /copies
+```
+
 ## Usage
 
 ```bash
