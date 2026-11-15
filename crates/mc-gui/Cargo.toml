@@ -13,14 +13,14 @@ path = "src/main.rs"
 
 [features]
 # "Render JavaScript" option, through Chromium; see mc-cli's feature.
-browser = ["dep:mc-requester-playwright"]
+browser = ["dep:mc-requester-playwright", "mc-cli/browser"]
 
 [dependencies]
 gpui-kit.workspace = true
+mc-cli.workspace = true
 mc-core.workspace = true
 mc-requester.workspace = true
 mc-requester-playwright = { workspace = true, optional = true }
-mc-requester-wreq.workspace = true
 mc-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true

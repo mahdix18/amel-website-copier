@@ -224,3 +224,74 @@ fn command_palette_runs_commands(cx: &mut TestAppContext) {
     })
     .unwrap();
 }
+
+#[gpui_kit::test]
+fn limits_and_output_tabs_reach_the_crawl(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime
+        .block_on(FixtureServer::start(Site::StaticBlog))
+        .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let (handle, view) = open(cx, config.path());
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        let output = out.path().to_string_lossy().into_owned();
+        view.update(cx, |view, cx| {
+            view.speed = mc_gui::job::Speed::Fast;
+            view.output_input()
+                .clone()
+                .update(cx, |input, cx| input.set_value(output, window, cx));
+        });
+        window.render_frame(cx);
+        window.click("url", cx);
+        window.input(server.base_url().as_str(), cx);
+        // A bad limit is explained, not run.
+        window.click("tab-limits", cx);
+        window.click("max-urls", cx);
+        window.input("lots", cx);
+        window.click("copy", cx);
+        assert_eq!(
+            window.find("status").label(),
+            Some("Max pages must be a whole number, not “lots”.")
+        );
+        window.click("max-urls", cx);
+        for _ in 0..4 {
+            window.press("backspace", cx);
+        }
+        window.input("3", cx);
+        window.click("tab-output", cx);
+        window.click("zip", cx);
+        window.click("copy", cx);
+    })
+    .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while cx.update(|cx| view.read(cx).progress().running()) {
+        assert!(Instant::now() < deadline, "the copy didn't finish");
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Let the zip, written after the crawl, reach the window.
+    cx.run_until_parked();
+
+    let progress = cx.update(|cx| view.read(cx).progress().clone());
+    assert_eq!(progress.phase, Phase::Finished, "{}", progress.status());
+    assert!(
+        progress.saved <= 3,
+        "max pages caps fetches: {}",
+        progress.saved
+    );
+    assert!(
+        progress.log.iter().any(|line| line.contains("Zip saved")),
+        "{:?}",
+        progress.log
+    );
+    let zips = std::fs::read_dir(out.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|e| e == "zip"))
+        .count();
+    assert_eq!(zips, 1, "the finished copy was zipped");
+}

@@ -56,6 +56,8 @@ On a terminal a progress bar stays at the bottom: URLs done out of found so far,
 mistercopy copy https://example.com -o ./copies -j 16 --delay-ms 0
 ```
 
+`--sitemaps` also copies the pages the site's sitemaps list (named in robots.txt, else `/sitemap.xml`; indexes and gzipped sitemaps included), so pages nothing links to aren't missed. robots.txt and the site's scope still apply. `--limit-rate 500K` caps the average download speed across all workers.
+
 ### Archives and serving
 
 ```bash
@@ -84,6 +86,9 @@ The window is laid out like an API client, in a dark theme (a light one is a cli
 
 - **Request bar**: the requester (HTTP with Chrome's TLS fingerprint, or AUTO with Chromium when built with `browser`), the site's address and **Copy**. Enter starts too. **Stop** saves progress; copying the same site into the same folder again continues where it stopped.
 - **Options**: the folder, **Parallel downloads** (1–32 workers) and **Speed**: *Polite* (1 request per second per site), *Balanced* (4 per second) or *Fast* (no gap, all workers at once). There are also switches for robots.txt and JavaScript.
+- **Limits**: max depth, max pages, stop after a size or a time, skip files over a size, a bandwidth limit, other names of the same site, sitemaps (on by default here), and assets from other sites.
+- **Auth**: Basic auth, extra headers (one per line), a cookies file, and a proxy. These are used for the run only and never saved. In builds with browser support, **Log in with browser** opens Chromium at the site. You log in there and press **Done**; the session's cookies are then saved in the copy's state folder (owner-only, left out of zips) and used for the copy.
+- **Output**: also write a WARC archive, a zip of the finished copy, or (with JavaScript rendering) the offline replay shim.
 - **Progress**: a progress bar (URLs done out of found so far), elapsed time, size and live speed, and counters for saved, unchanged, failed and retried files. **Workers** shows what each parallel worker is doing: downloading (GET), holding a URL until the site's turn comes (WAIT), or idle. **Activity** lists every file with its result, size or error, and can show errors only. When the copy ends, **Open report** opens the HTML report.
 - Workers, speed, switches and theme are remembered in `~/.config/mistercopy/prefs.json`.
 
@@ -135,6 +140,8 @@ Useful `copy` and `scan` options:
 | `--external-assets` | Also fetch images, CSS and scripts from other hosts |
 | `-j/--workers/--concurrency 4`, `--delay-ms 1000` | Parallel downloads, and the gap between two requests to one site |
 | `--retries 3`, `--timeout-secs 30` | Patience |
+| `--sitemaps` | Also copy the pages listed in the site's sitemaps |
+| `--limit-rate RATE` | Cap the average download speed, e.g. `500K` or `2M` |
 | `--ignore-robots` | Fetch what robots.txt disallows; only for sites you may copy |
 
 These options are saved with the copy and reused by `resume` and `update`.

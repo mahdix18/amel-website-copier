@@ -584,11 +584,29 @@ impl LoginStep {
 
 /// Opens a visible browser at `url` for the user to log in by hand, then
 /// saves the session's cookies to `save_to` in Netscape format, readable by
-/// `--cookies`. The file is created readable by its owner only.
+/// `--cookies`, once they press Enter in the terminal. The file is created
+/// readable by its owner only.
 pub async fn interactive_login(
     url: &Url,
     executable: Option<PathBuf>,
     save_to: &Path,
+) -> Result<usize, String> {
+    let enter = async {
+        println!("Log in in the browser window, then press Enter here.");
+        let mut line = String::new();
+        let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+        let _ = tokio::io::AsyncBufReadExt::read_line(&mut stdin, &mut line).await;
+    };
+    interactive_login_until(url, executable, save_to, enter).await
+}
+
+/// [`interactive_login`], finishing when `done` completes instead of on
+/// Enter; the desktop app passes a button press.
+pub async fn interactive_login_until(
+    url: &Url,
+    executable: Option<PathBuf>,
+    save_to: &Path,
+    done: impl std::future::Future<Output = ()>,
 ) -> Result<usize, String> {
     let playwright = Playwright::launch().await.map_err(|e| e.to_string())?;
     let mut options = LaunchOptions::new().headless(false);
@@ -606,12 +624,7 @@ pub async fn interactive_login(
         .await
         .map_err(|e| e.to_string())?;
 
-    println!("Log in in the browser window, then press Enter here.");
-    let mut line = String::new();
-    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
-    tokio::io::AsyncBufReadExt::read_line(&mut stdin, &mut line)
-        .await
-        .map_err(|e| e.to_string())?;
+    done.await;
 
     let cookies = context.cookies(None).await.map_err(|e| e.to_string())?;
     let _ = browser.close().await;
@@ -655,6 +668,9 @@ pub fn netscape_cookies(cookies: &[Cookie]) -> String {
 
 fn write_cookie_file(path: &Path, cookies: &[Cookie]) -> std::io::Result<()> {
     use std::io::Write as _;
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]

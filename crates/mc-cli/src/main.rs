@@ -1,12 +1,11 @@
-mod archive;
 mod copy;
-mod options;
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use mc_requester::{RequesterInfo, RequesterRegistry};
-use mc_requester_wreq::WreqFactory;
+use mc_cli::archive;
+use mc_cli::requesters::registry;
+use mc_requester::RequesterInfo;
 
 #[derive(Parser)]
 #[command(
@@ -83,19 +82,6 @@ enum RequestersCommand {
         #[arg(long)]
         json: bool,
     },
-}
-
-/// Every requester this build includes. Playwright needs the `browser` feature.
-fn registry() -> RequesterRegistry {
-    let mut registry = RequesterRegistry::new();
-    registry
-        .register(WreqFactory)
-        .expect("requester ids are unique");
-    #[cfg(feature = "browser")]
-    registry
-        .register(mc_requester_playwright::PlaywrightFactory)
-        .expect("requester ids are unique");
-    registry
 }
 
 #[cfg(feature = "browser")]

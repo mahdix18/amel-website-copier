@@ -267,3 +267,106 @@ async fn reports_workers_and_progress() {
     let (done, total, active) = last.unwrap();
     assert_eq!((done, active), (total, 0), "finished with nothing left");
 }
+
+#[tokio::test]
+async fn sitemaps_seed_pages_nothing_links_to() {
+    let out = tempfile::tempdir().unwrap();
+    let requester = MockRequester::new()
+        .route(url("https://site.test/"), MockRoute::html("<p>no links</p>"))
+        .route(
+            url("https://site.test/robots.txt"),
+            MockRoute::respond(
+                StatusCode::OK,
+                "text/plain",
+                "User-agent: *\nDisallow: /private/\nSitemap: https://site.test/index.xml\n",
+            ),
+        )
+        .route(
+            url("https://site.test/index.xml"),
+            MockRoute::respond(
+                StatusCode::OK,
+                "application/xml",
+                "<sitemapindex><sitemap><loc>https://site.test/pages.xml</loc></sitemap></sitemapindex>",
+            ),
+        )
+        .route(
+            url("https://site.test/pages.xml"),
+            MockRoute::respond(
+                StatusCode::OK,
+                "application/xml",
+                "<urlset><url><loc>https://site.test/orphan</loc></url>\
+                 <url><loc>https://site.test/private/x</loc></url>\
+                 <url><loc>https://other.test/away</loc></url></urlset>",
+            ),
+        )
+        .route(url("https://site.test/orphan"), MockRoute::html("found via sitemap"));
+    let requester = Arc::new(requester);
+    let mut config = config(out.path());
+    config.use_sitemaps = true;
+    let crawler = Crawler::new(config, requester.clone());
+    let mut events = crawler.subscribe();
+    let summary = crawler.run().await.unwrap();
+
+    assert!(
+        out.path().join("site.test/orphan.html").is_file(),
+        "{:?}",
+        summary.failed
+    );
+    let calls = requester.calls();
+    assert!(
+        !calls.iter().any(|u| u.path() == "/private/x"),
+        "robots.txt still applies"
+    );
+    assert!(
+        !calls.iter().any(|u| u.host_str() == Some("other.test")),
+        "scope still applies"
+    );
+    assert_eq!(
+        calls.iter().filter(|u| u.path() == "/robots.txt").count(),
+        1,
+        "robots.txt is fetched once"
+    );
+    let mut read = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let CrawlEvent::SitemapRead { url, pages } = event {
+            read.push((url.path().to_owned(), pages));
+        }
+    }
+    assert_eq!(
+        read,
+        [("/index.xml".to_owned(), 0), ("/pages.xml".to_owned(), 3)]
+    );
+}
+
+#[tokio::test]
+async fn rate_limit_slows_downloads() {
+    let out = tempfile::tempdir().unwrap();
+    let body = "x".repeat(10_000);
+    let links: String = (0..4)
+        .map(|i| format!(r#"<a href="/f{i}.txt">f</a>"#))
+        .collect();
+    let mut requester =
+        MockRequester::new().route(url("https://site.test/"), MockRoute::html(links));
+    for i in 0..4 {
+        requester = requester.route(
+            url(&format!("https://site.test/f{i}.txt")),
+            MockRoute::respond(StatusCode::OK, "text/plain", body.clone()),
+        );
+    }
+    let mut config = config(out.path());
+    config.respect_robots = false;
+    config.concurrency = 4;
+    // About 40 KB at 100 KB/s: at least 0.3 s however many workers.
+    config.max_rate = Some(100_000);
+    let started = std::time::Instant::now();
+    let summary = Crawler::new(config, Arc::new(requester))
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(summary.saved, 5);
+    assert!(
+        started.elapsed() >= Duration::from_millis(300),
+        "{:?}",
+        started.elapsed()
+    );
+}

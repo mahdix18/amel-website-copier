@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Icon, IconName, Selectable, Sizable};
 use gpui_kit::prelude::*;
@@ -17,6 +17,7 @@ use gpui_kit::{
 };
 use mc_core::{StopHandle, human_bytes};
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::oneshot;
 
 use crate::insight::{self, MapLine};
 use crate::job::{self, LineKind, MAX_WORKERS, Progress, Settings, Speed};
@@ -51,8 +52,31 @@ pub fn bind_keys(cx: &mut App) {
 pub enum Tab {
     /// Folder, workers, speed and switches.
     Copy,
+    /// Depth, size, time and bandwidth limits; sitemaps and aliases.
+    Limits,
     Rules,
+    /// Credentials, headers, cookies, browser login and proxy.
+    Auth,
+    /// WARC, zip and offline replay.
+    Output,
     LinkMap,
+}
+
+/// Inputs of the Limits, Rules and Auth tabs beyond the basics.
+struct Fields {
+    download_only: Entity<InputState>,
+    max_depth: Entity<InputState>,
+    max_urls: Entity<InputState>,
+    max_size_mb: Entity<InputState>,
+    max_time_min: Entity<InputState>,
+    max_file_mb: Entity<InputState>,
+    limit_rate: Entity<InputState>,
+    aliases: Entity<InputState>,
+    auth_user: Entity<InputState>,
+    auth_password: Entity<InputState>,
+    headers: Entity<TextareaState>,
+    cookies: Entity<InputState>,
+    proxy: Entity<InputState>,
 }
 
 /// The tabs of the result panel.
@@ -75,6 +99,15 @@ pub struct CopyWindow {
     /// Parallel downloads.
     pub workers: usize,
     respect_robots: bool,
+    fields: Fields,
+    external_assets: bool,
+    sitemaps: bool,
+    warc: bool,
+    zip: bool,
+    replay: bool,
+    /// Set while a browser login window is open; sending finishes it.
+    login: Option<oneshot::Sender<()>>,
+    login_note: String,
     projects: Projects,
     /// Each project's status, read from its store when the list changes
     /// rather than on every frame.
@@ -151,6 +184,31 @@ impl CopyWindow {
             };
             look.apply(cx);
         }
+        let defaults = Settings::default();
+        let fields = Fields {
+            download_only: input("e.g. \\.(pdf|zip)$", window, cx),
+            max_depth: input("no limit", window, cx),
+            max_urls: input("no limit", window, cx),
+            max_size_mb: input("no limit", window, cx),
+            max_time_min: input("no limit", window, cx),
+            max_file_mb: cx
+                .new(|cx| InputState::new(window, cx).default_value(defaults.max_file_mb.clone())),
+            limit_rate: input("no limit, e.g. 500K or 2M", window, cx),
+            aliases: input("e.g. www.example.com, cdn.example.com", window, cx),
+            auth_user: input("user name", window, cx),
+            auth_password: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .masked(true)
+                    .placeholder("password")
+            }),
+            headers: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(3, 6)
+                    .placeholder("Authorization: Bearer …\nAccept-Language: en")
+            }),
+            cookies: input("path to a cookies.txt file", window, cx),
+            proxy: input("e.g. socks5://127.0.0.1:1080", window, cx),
+        };
         Self {
             url,
             output: cx.new(|cx| InputState::new(window, cx).default_value(job::default_output())),
@@ -162,6 +220,14 @@ impl CopyWindow {
             speed: prefs.speed,
             workers: prefs.workers,
             respect_robots: prefs.respect_robots,
+            fields,
+            external_assets: false,
+            sitemaps: prefs.sitemaps,
+            warc: false,
+            zip: false,
+            replay: false,
+            login: None,
+            login_note: String::new(),
             projects,
             statuses,
             selected: None,
@@ -188,6 +254,7 @@ impl CopyWindow {
             speed: self.speed,
             respect_robots: self.respect_robots,
             render_js: self.render_js,
+            sitemaps: self.sitemaps,
             dark: Look::global(cx).dark,
         };
         let _ = prefs.save(self.prefs_path.as_ref());
@@ -326,17 +393,113 @@ impl CopyWindow {
     }
 
     fn settings(&self, update: bool, cx: &Context<Self>) -> Settings {
+        let f = &self.fields;
+        let text = |input: &Entity<InputState>| Self::text(input, cx);
         Settings {
-            url: Self::text(&self.url, cx),
-            output: Self::text(&self.output, cx),
+            url: text(&self.url),
+            output: text(&self.output),
             render_js: self.render_js,
             workers: self.workers,
             per_host_delay: self.speed.delay(),
             respect_robots: self.respect_robots,
-            exclude: Self::text(&self.exclude, cx),
-            include: Self::text(&self.include, cx),
+            exclude: text(&self.exclude),
+            include: text(&self.include),
+            download_only: text(&f.download_only),
+            max_depth: text(&f.max_depth),
+            max_urls: text(&f.max_urls),
+            max_size_mb: text(&f.max_size_mb),
+            max_time_min: text(&f.max_time_min),
+            max_file_mb: text(&f.max_file_mb),
+            limit_rate: text(&f.limit_rate),
+            aliases: text(&f.aliases),
+            external_assets: self.external_assets,
+            sitemaps: self.sitemaps,
+            auth_user: text(&f.auth_user),
+            auth_password: text(&f.auth_password),
+            headers: f.headers.read(cx).value().to_string(),
+            cookies: text(&f.cookies),
+            proxy: text(&f.proxy),
+            warc: self.warc,
+            zip: self.zip,
+            replay: self.replay,
             update,
         }
+    }
+
+    /// Opens Chromium at the site for the user to log in, and saves the
+    /// session's cookies for the copy once they press Done.
+    #[cfg(feature = "browser")]
+    fn login(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(done) = self.login.take() {
+            let _ = done.send(());
+            self.login_note = "Saving the session…".to_owned();
+            return cx.notify();
+        }
+        let (url, output) = match job::parse(&self.settings(false, cx)) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                self.login_note = message;
+                return cx.notify();
+            }
+        };
+        let save_to = job::login_cookies(&output);
+        let (done_tx, done_rx) = oneshot::channel::<()>();
+        let (result_tx, result_rx) = oneshot::channel();
+        self.login = Some(done_tx);
+        self.login_note = "Log in in the Chromium window, then press Done here.".to_owned();
+        let target = save_to.clone();
+        let started = std::thread::Builder::new()
+            .name("mistercopy-login".to_owned())
+            .spawn(move || {
+                let result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| e.to_string())
+                    .and_then(|runtime| {
+                        runtime.block_on(mc_requester_playwright::interactive_login_until(
+                            &url,
+                            None,
+                            &target,
+                            async {
+                                let _ = done_rx.await;
+                            },
+                        ))
+                    });
+                let _ = result_tx.send(result);
+            });
+        if let Err(error) = started {
+            self.login = None;
+            self.login_note = format!("Could not open the browser: {error}");
+            return cx.notify();
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            let result = result_rx
+                .await
+                .unwrap_or_else(|_| Err("The login ended unexpectedly.".to_owned()));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.login = None;
+                match result {
+                    Ok(0) => {
+                        this.login_note =
+                            "The browser set no cookies; did the login finish? Try again."
+                                .to_owned();
+                    }
+                    Ok(count) => {
+                        let path = save_to.to_string_lossy().into_owned();
+                        this.fields
+                            .cookies
+                            .update(cx, |input, cx| input.set_value(path, window, cx));
+                        this.login_note = format!(
+                            "Saved {count} cookies for this copy. They hold a live session; keep the folder private."
+                        );
+                    }
+                    Err(error) => this.login_note = error,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     fn start(&mut self, update: bool, cx: &mut Context<Self>) {
@@ -386,11 +549,15 @@ impl CopyWindow {
                     Err(RecvError::Closed) => break,
                 }
             }
-            let result = done
-                .await
-                .unwrap_or_else(|_| Err("The copy ended unexpectedly.".to_owned()));
+            let outcome = done.await.unwrap_or_else(|_| job::Outcome {
+                result: Err("The copy ended unexpectedly.".to_owned()),
+                zip: None,
+            });
             let _ = this.update(cx, |this, cx| {
-                this.progress.finish(result, &output);
+                this.progress.finish(outcome.result, &output);
+                if let Some(zip) = outcome.zip {
+                    this.progress.zipped(zip);
+                }
                 // Idle workers say nothing once it's over; the log does.
                 this.pane = Pane::Activity;
                 this.stop = None;
@@ -599,12 +766,36 @@ impl CopyWindow {
                 |this, cx| this.show(Tab::Copy, cx),
             ))
             .child(item(
+                "rail-limits",
+                IconName::Cpu,
+                "Limits",
+                self.tab == Tab::Limits,
+                cx,
+                |this, cx| this.show(Tab::Limits, cx),
+            ))
+            .child(item(
                 "rail-rules",
                 IconName::Settings2,
                 "Rules",
                 self.tab == Tab::Rules,
                 cx,
                 |this, cx| this.show(Tab::Rules, cx),
+            ))
+            .child(item(
+                "rail-auth",
+                IconName::User,
+                "Authentication",
+                self.tab == Tab::Auth,
+                cx,
+                |this, cx| this.show(Tab::Auth, cx),
+            ))
+            .child(item(
+                "rail-output",
+                IconName::HardDrive,
+                "Output",
+                self.tab == Tab::Output,
+                cx,
+                |this, cx| this.show(Tab::Output, cx),
             ))
             .child(item(
                 "rail-map",
@@ -926,9 +1117,27 @@ impl CopyWindow {
     }
 
     fn tabs(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
-        let rules = [&self.exclude, &self.include]
+        let filled = |inputs: &[&Entity<InputState>]| {
+            inputs
+                .iter()
+                .filter(|input| !Self::text(input, cx).trim().is_empty())
+                .count()
+        };
+        let f = &self.fields;
+        let rules = filled(&[&self.exclude, &self.include, &f.download_only]);
+        let limits = filled(&[
+            &f.max_depth,
+            &f.max_urls,
+            &f.max_size_mb,
+            &f.max_time_min,
+            &f.limit_rate,
+            &f.aliases,
+        ]);
+        let auth = filled(&[&f.auth_user, &f.cookies, &f.proxy])
+            + usize::from(!f.headers.read(cx).value().trim().is_empty());
+        let output = [self.warc, self.zip, self.replay && self.render_js]
             .iter()
-            .filter(|input| !Self::text(input, cx).trim().is_empty())
+            .filter(|on| **on)
             .count();
         let tab = |id: &'static str, label: &'static str, which: Tab, badge: usize| {
             underline_tab(
@@ -946,7 +1155,10 @@ impl CopyWindow {
             .border_b_1()
             .border_color(look.border)
             .child(tab("tab-copy", "Options", Tab::Copy, 0))
+            .child(tab("tab-limits", "Limits", Tab::Limits, limits))
             .child(tab("tab-rules", "Rules", Tab::Rules, rules))
+            .child(tab("tab-auth", "Auth", Tab::Auth, auth))
+            .child(tab("tab-output", "Output", Tab::Output, output))
             .child(tab("tab-map", "Link map", Tab::LinkMap, 0))
             .into_any_element()
     }
@@ -1096,6 +1308,233 @@ impl CopyWindow {
             .into_any_element()
     }
 
+    fn limits_view(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let f = &self.fields;
+        let cell = |label: &'static str, input: &Entity<InputState>, id: &'static str| {
+            div().flex_1().min_w(px(150.)).child(labelled(
+                label,
+                None,
+                Input::new(input).id(id).aria_label(label),
+                look,
+            ))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(cell("Max depth", &f.max_depth, "max-depth"))
+                    .child(cell("Max pages", &f.max_urls, "max-urls"))
+                    .child(cell("Skip files over (MB)", &f.max_file_mb, "max-file")),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(cell("Stop after (MB)", &f.max_size_mb, "max-size"))
+                    .child(cell("Stop after (minutes)", &f.max_time_min, "max-time"))
+                    .child(cell("Bandwidth limit", &f.limit_rate, "limit-rate")),
+            )
+            .child(labelled(
+                "Same site under other names",
+                None,
+                Input::new(&f.aliases).id("aliases").aria_label("Aliases"),
+                look,
+            ))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_6()
+                    .child(
+                        Switch::new("sitemaps")
+                            .checked(self.sitemaps)
+                            .label("Use the site's sitemap to find unlinked pages")
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.sitemaps = *checked;
+                                this.changed(cx);
+                            })),
+                    )
+                    .child(
+                        Switch::new("external-assets")
+                            .checked(self.external_assets)
+                            .label("Also fetch images, styles and scripts from other sites")
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.external_assets = *checked;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn auth_view(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let f = &self.fields;
+        let login = if job::browser_support() {
+            let open = self.login.is_some();
+            Button::new("login")
+                .outline()
+                .icon(if open {
+                    IconName::Check
+                } else {
+                    IconName::Globe
+                })
+                .label(if open { "Done" } else { "Log in with browser" })
+                .tooltip("Opens Chromium at the site; log in there, then press Done")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    #[cfg(feature = "browser")]
+                    this.login(window, cx);
+                    #[cfg(not(feature = "browser"))]
+                    let _ = (this, window, cx);
+                }))
+                .into_any_element()
+        } else {
+            div()
+                .text_xs()
+                .text_color(look.muted)
+                .child("Browser login needs a build with --features browser; `mistercopy login` saves a cookies file.")
+                .into_any_element()
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(look.muted)
+                    .child("Used for this copy only and never saved to disk, except the cookies file a browser login writes."),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(div().flex_1().child(labelled(
+                        "Basic auth user",
+                        None,
+                        Input::new(&f.auth_user).id("auth-user").aria_label("User name"),
+                        look,
+                    )))
+                    .child(div().flex_1().child(labelled(
+                        "Password",
+                        None,
+                        Input::new(&f.auth_password)
+                            .mask_toggle()
+                            .id("auth-password")
+                            .aria_label("Password"),
+                        look,
+                    ))),
+            )
+            .child(labelled(
+                "Headers",
+                Some("one “Name: value” per line, sent to the site's own hosts"),
+                Textarea::new(&f.headers).aria_label("Headers"),
+                look,
+            ))
+            .child(labelled(
+                "Cookies",
+                None,
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(Input::new(&f.cookies).id("cookies").aria_label("Cookies file")),
+                    )
+                    .child(login),
+                look,
+            ))
+            .when(!self.login_note.is_empty(), |el| {
+                el.child(
+                    div()
+                        .id("login-note")
+                        .test_support()
+                        .aria_label(SharedString::from(self.login_note.clone()))
+                        .text_xs()
+                        .text_color(look.muted)
+                        .child(self.login_note.clone()),
+                )
+            })
+            .child(labelled(
+                "Proxy",
+                None,
+                Input::new(&f.proxy).id("proxy").aria_label("Proxy"),
+                look,
+            ))
+            .into_any_element()
+    }
+
+    fn output_view(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let option = |id: &'static str,
+                      label: &'static str,
+                      hint: &'static str,
+                      on: bool,
+                      set: fn(&mut Self, bool),
+                      cx: &mut Context<Self>| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(
+                    Switch::new(id)
+                        .checked(on)
+                        .label(label)
+                        .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                            set(this, *checked);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    div()
+                        .pl(px(44.))
+                        .text_xs()
+                        .text_color(look.muted)
+                        .child(hint),
+                )
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(look.muted)
+                    .child("Every copy is a folder of files that open in any browser, plus an HTML and JSON report. Add:"),
+            )
+            .child(option(
+                "warc",
+                "WARC archive",
+                "Every response as served, in a .warc.gz next to the copy, for web-archive tools.",
+                self.warc,
+                |this, on| this.warc = on,
+                cx,
+            ))
+            .child(option(
+                "zip",
+                "Zip file",
+                "The finished copy and its report packed into one .zip to share.",
+                self.zip,
+                |this, on| this.zip = on,
+                cx,
+            ))
+            .when(job::browser_support(), |el| {
+                el.child(option(
+                    "replay",
+                    "Offline replay for JavaScript apps",
+                    "Keeps scripts and embeds the data they fetched (needs Render JavaScript).",
+                    self.replay,
+                    |this, on| this.replay = on,
+                    cx,
+                ))
+            })
+            .into_any_element()
+    }
+
     fn rules_view(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
         let verdict = SharedString::from(self.rule_verdict.clone());
         div()
@@ -1126,6 +1565,16 @@ impl CopyWindow {
                             Input::new(&self.include)
                                 .id("include")
                                 .aria_label("Include pattern"),
+                            look,
+                        )),
+                    )
+                    .child(
+                        div().flex_1().child(labelled(
+                            "Save without following links",
+                            None,
+                            Input::new(&self.fields.download_only)
+                                .id("download-only")
+                                .aria_label("Download-only pattern"),
                             look,
                         )),
                     ),
@@ -1757,6 +2206,9 @@ impl Render for CopyWindow {
         let view = match self.tab {
             Tab::Copy => self.options_view(&look, cx),
             Tab::Rules => self.rules_view(&look, cx),
+            Tab::Limits => self.limits_view(&look, cx),
+            Tab::Auth => self.auth_view(&look, cx),
+            Tab::Output => self.output_view(&look, cx),
             Tab::LinkMap => self.map_view(&look, cx),
         };
         let result = self.result_panel(&look, cx);
@@ -1810,7 +2262,14 @@ impl Render for CopyWindow {
                                     .border_color(look.border)
                                     .child(request)
                                     .child(tabs)
-                                    .child(view),
+                                    // Long tabs scroll, so progress stays in view.
+                                    .child(
+                                        div()
+                                            .id("tab-body")
+                                            .max_h(px(290.))
+                                            .overflow_y_scroll()
+                                            .child(view),
+                                    ),
                             )
                             .child(result),
                     ),

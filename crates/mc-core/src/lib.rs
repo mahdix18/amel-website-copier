@@ -14,6 +14,7 @@ mod report;
 mod retry;
 mod robots;
 mod rules;
+mod sitemap;
 mod store;
 mod warc;
 

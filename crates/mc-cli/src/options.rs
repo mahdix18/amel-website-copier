@@ -119,6 +119,40 @@ pub struct CrawlOptions {
     /// Also pack the finished copy and its report into a zip file.
     #[arg(long)]
     pub zip: bool,
+
+    /// Also copy the pages listed in the site's sitemaps (named in
+    /// robots.txt, else `/sitemap.xml`), including ones nothing links to.
+    #[arg(long)]
+    pub sitemaps: bool,
+
+    /// Cap the average download speed across all workers, e.g. `500K` or
+    /// `2M` (bytes per second; K and M are 1024 and 1024²).
+    #[arg(long, value_name = "RATE", value_parser = parse_rate)]
+    pub limit_rate: Option<u64>,
+}
+
+/// `500K`, `2M`, `1.5m` or plain bytes, per second.
+pub fn parse_rate(text: &str) -> Result<u64, String> {
+    let text = text.trim();
+    let (number, unit) = match text.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => (&text[..i], c.to_ascii_lowercase()),
+        _ => (text, 'b'),
+    };
+    let multiplier = match unit {
+        'b' => 1.0,
+        'k' => 1024.0,
+        'm' => 1024.0 * 1024.0,
+        'g' => 1024.0 * 1024.0 * 1024.0,
+        _ => return Err(format!("unknown unit in `{text}`; use K, M or G")),
+    };
+    let value: f64 = number
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{text}` is not a rate like 500K or 2M"))?;
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!("rate `{text}` must be above zero"));
+    }
+    Ok((value * multiplier).round().max(1.0) as u64)
 }
 
 impl Default for CrawlOptions {
@@ -150,6 +184,8 @@ impl CrawlOptions {
         config.respect_robots = !self.ignore_robots;
         config.warc = self.warc.clone();
         config.replay = self.replay;
+        config.use_sitemaps = self.sitemaps;
+        config.max_rate = self.limit_rate;
         Ok(config)
     }
 
@@ -325,6 +361,17 @@ fn import_cookies(jar: &CookieJar, text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_rates() {
+        assert_eq!(parse_rate("500K"), Ok(512_000));
+        assert_eq!(parse_rate("2m"), Ok(2 * 1024 * 1024));
+        assert_eq!(parse_rate("1.5M"), Ok(1_572_864));
+        assert_eq!(parse_rate("1000"), Ok(1000));
+        assert!(parse_rate("0").is_err());
+        assert!(parse_rate("fast").is_err());
+        assert!(parse_rate("5X").is_err());
+    }
 
     #[test]
     fn defaults_match_the_command_line() {

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,6 +24,7 @@ use crate::report::Report;
 use crate::retry::{self, MAX_RETRY_AFTER};
 use crate::robots::{self, RobotsRules};
 use crate::rules::{Decision, Policy, Rule, Scope, SkipReason};
+use crate::sitemap;
 use crate::store::{
     CrawlStatus, Document, EntryState, SavedFile, StateStore, StoreError, UrlEntry,
 };
@@ -31,6 +32,10 @@ use crate::warc::WarcWriter;
 
 /// Redirect hops followed between entries before giving up on a cycle.
 const MAX_ALIAS_HOPS: usize = 16;
+/// Sitemap files read per crawl, indexes included.
+const MAX_SITEMAPS: usize = 200;
+/// Pages queued from sitemaps per crawl.
+const MAX_SITEMAP_PAGES: usize = 200_000;
 
 /// Inside the output directory: crawl state and pristine copies of the
 /// documents whose links get rewritten.
@@ -73,6 +78,11 @@ pub struct CrawlConfig {
     /// apps can load it offline. Useful with a browser requester that keeps
     /// scripts.
     pub replay: bool,
+    /// Also queue the pages the site's sitemaps list (named in robots.txt,
+    /// else `/sitemap.xml`), so pages nothing links to are copied too.
+    pub use_sitemaps: bool,
+    /// Average download speed cap, in bytes per second, across all workers.
+    pub max_rate: Option<u64>,
 }
 
 impl CrawlConfig {
@@ -100,6 +110,8 @@ impl CrawlConfig {
             write_report: true,
             warc: None,
             replay: false,
+            use_sitemaps: false,
+            max_rate: None,
         }
     }
 }
@@ -210,6 +222,11 @@ pub enum CrawlEvent {
     WorkerIdle {
         worker: usize,
     },
+    /// A sitemap was read and listed this many pages.
+    SitemapRead {
+        url: Url,
+        pages: usize,
+    },
     /// Counts for a progress bar, sent whenever they change. `done` URLs
     /// are finished one way or another; `total` grows as links are found.
     Progress {
@@ -257,12 +274,18 @@ pub struct Crawler {
     events: broadcast::Sender<CrawlEvent>,
     store: Option<Box<dyn StateStore>>,
     stop: StopHandle,
+    limit: Option<Arc<RateLimit>>,
 }
 
 impl Crawler {
     pub fn new(config: CrawlConfig, requester: Arc<dyn Requester>) -> Self {
         let (events, _) = broadcast::channel(1024);
+        let limit = config
+            .max_rate
+            .filter(|rate| *rate > 0)
+            .map(|rate| Arc::new(RateLimit::new(rate)));
         Self {
+            limit,
             config,
             requester,
             events,
@@ -319,6 +342,9 @@ impl Crawler {
             .await
             .map_err(CrawlError::Requester)?;
 
+        if self.config.use_sitemaps {
+            self.discover_sitemaps(&mut state, &policy, &seeds).await;
+        }
         self.crawl(&mut state, &policy, started).await;
         if let Some(error) = state.store_error.take() {
             return Err(error.into());
@@ -412,6 +438,108 @@ impl Crawler {
             }
         }
         Ok(())
+    }
+
+    /// Reads the seeds' sitemaps (from robots.txt, else `/sitemap.xml`) and
+    /// queues the pages they list one level below the seed. The robots.txt
+    /// fetched here also serves as the crawl's own.
+    async fn discover_sitemaps(&self, state: &mut State, policy: &Policy, seeds: &[Url]) {
+        let mut todo = VecDeque::new();
+        let mut seen = HashSet::new();
+        for seed in seeds {
+            let Some(robots_url) = robots::robots_url(seed) else {
+                continue;
+            };
+            let result = self.fetch_now(state, policy, &robots_url).await;
+            let mut found = match &result {
+                Ok(response) if response.status.is_success() => read_body(&response.body)
+                    .await
+                    .map(|body| sitemap::from_robots(&body, &robots_url))
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let key = robots::origin_key(seed);
+            if !state.robots.contains_key(&key) {
+                self.robots_fetched(state, key, &result);
+            }
+            if found.is_empty()
+                && let Ok(fallback) = seed.join("/sitemap.xml")
+            {
+                found.push(fallback);
+            }
+            todo.extend(found.into_iter().filter(|url| seen.insert(url.clone())));
+        }
+
+        let Some(seed) = seeds.first() else {
+            return;
+        };
+        let parent = Job {
+            url: seed.clone(),
+            depth: 0,
+            kind: LinkKind::Page,
+            referrer: None,
+            follow_links: true,
+            attempt: 0,
+            head: false,
+        };
+        let (mut read, mut queued) = (0, 0);
+        while let Some(url) = todo.pop_front() {
+            if read >= MAX_SITEMAPS || queued >= MAX_SITEMAP_PAGES || self.stop.requested() {
+                break;
+            }
+            read += 1;
+            let Ok(response) = self.fetch_now(state, policy, &url).await else {
+                continue;
+            };
+            if !response.status.is_success() {
+                continue;
+            }
+            let Ok(body) = read_body(&response.body).await else {
+                continue;
+            };
+            let listed = sitemap::parse(&body, &url);
+            todo.extend(
+                listed
+                    .sitemaps
+                    .into_iter()
+                    .filter(|url| seen.insert(url.clone())),
+            );
+            let pages = listed.pages.len();
+            for page in listed.pages.into_iter().take(MAX_SITEMAP_PAGES - queued) {
+                let link = Link {
+                    url: page,
+                    kind: LinkKind::Page,
+                };
+                self.enqueue(state, policy, link, &parent);
+                queued += 1;
+            }
+            self.emit(CrawlEvent::SitemapRead { url, pages });
+        }
+    }
+
+    /// One request outside the worker pool, still waiting for the host's
+    /// turn and carrying the site's headers and credentials.
+    async fn fetch_now(
+        &self,
+        state: &mut State,
+        policy: &Policy,
+        url: &Url,
+    ) -> Result<FetchResponse, FetchError> {
+        let slot = state.reserve_slot(url, self.config.per_host_delay);
+        tokio::time::sleep_until(slot).await;
+        let job = Job {
+            url: url.clone(),
+            depth: 0,
+            kind: LinkKind::Asset,
+            referrer: None,
+            follow_links: false,
+            attempt: 0,
+            head: false,
+        };
+        let request = self.request_for(state, policy, &job);
+        self.requester
+            .fetch(request, &FetchContext::default())
+            .await
     }
 
     fn job_from(&self, entry: &UrlEntry) -> Job {
@@ -609,11 +737,15 @@ impl Crawler {
             let worker = workers.pop().unwrap_or_default();
             self.announce(worker, &job.url, slot);
             let events = self.events.clone();
+            let limit = self.limit.clone();
             let handle = tasks.spawn(async move {
                 tokio::time::sleep_until(slot).await;
                 let url = job.url.clone();
                 let _ = events.send(CrawlEvent::Fetching { worker, url });
                 let result = requester.fetch(request, &context).await;
+                if let (Some(limit), Ok(response)) = (&limit, &result) {
+                    limit.take(body_len(&response.body).await).await;
+                }
                 Task::Fetch(job, result)
             });
             in_flight.insert(handle.id(), InFlight::Page(tracked, worker));
@@ -1468,6 +1600,43 @@ fn charset(headers: &HeaderMap) -> Option<String> {
             .eq_ignore_ascii_case("charset")
             .then(|| value.trim().trim_matches('"').to_owned())
     })
+}
+
+/// Spreads downloads out so their average speed stays under a cap: each
+/// finished body books its share of time, and its worker waits it out
+/// before taking the next URL.
+struct RateLimit {
+    bytes_per_sec: u64,
+    next: std::sync::Mutex<Deadline>,
+}
+
+impl RateLimit {
+    fn new(bytes_per_sec: u64) -> Self {
+        Self {
+            bytes_per_sec,
+            next: std::sync::Mutex::new(Deadline::now()),
+        }
+    }
+
+    async fn take(&self, bytes: u64) {
+        let share = Duration::from_secs_f64(bytes as f64 / self.bytes_per_sec as f64);
+        let until = {
+            let mut next = self
+                .next
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *next = (*next).max(Deadline::now()) + share;
+            *next
+        };
+        tokio::time::sleep_until(until).await;
+    }
+}
+
+async fn body_len(body: &Body) -> u64 {
+    match body {
+        Body::Bytes(bytes) => bytes.len() as u64,
+        Body::File(path) => tokio::fs::metadata(path).await.map_or(0, |m| m.len()),
+    }
 }
 
 async fn read_body(body: &Body) -> std::io::Result<Vec<u8>> {

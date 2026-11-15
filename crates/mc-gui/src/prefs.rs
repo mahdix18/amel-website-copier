@@ -14,6 +14,8 @@ pub struct Prefs {
     pub speed: Speed,
     pub respect_robots: bool,
     pub render_js: bool,
+    /// Also queue the pages the site's sitemaps list.
+    pub sitemaps: bool,
     pub dark: bool,
 }
 
@@ -24,6 +26,7 @@ impl Default for Prefs {
             speed: Speed::default(),
             respect_robots: true,
             render_js: false,
+            sitemaps: true,
             dark: true,
         }
     }

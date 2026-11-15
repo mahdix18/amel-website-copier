@@ -6,16 +6,16 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use mc_cli::requesters::build_requester;
 use mc_core::{
     CrawlEvent, CrawlStatus, CrawlSummary, Crawler, REPORT_HTML, REPORT_JSON, StopHandle,
     human_bytes,
 };
-use mc_requester::{AUTO_ID, HybridRequester, Requester, RequesterRegistry, SharedResources, Url};
+use mc_requester::{RequesterRegistry, Url};
 use mc_store::SqliteStore;
-use std::sync::Arc;
 use tokio::sync::broadcast::{self, error::RecvError};
 
-use crate::options::{CrawlOptions, SessionArgs};
+use mc_cli::options::{CrawlOptions, SessionArgs};
 
 /// Invalid command line, configuration or state.
 const EXIT_USAGE: u8 = 2;
@@ -246,39 +246,6 @@ fn open_existing(dir: &Path) -> Result<(SqliteStore, Url, CrawlOptions), String>
     Ok((store, seed, options))
 }
 
-/// The requester named by `--requester`. `auto` combines wreq with the
-/// browser, using the browser only for pages that need it.
-fn build_requester(
-    registry: &RequesterRegistry,
-    options: &CrawlOptions,
-    login: Option<serde_json::Value>,
-    shared: &SharedResources,
-) -> Result<Arc<dyn Requester>, String> {
-    let uses_browser = options.requester == AUTO_ID || options.requester == "playwright";
-    if login.is_some() && !uses_browser {
-        return Err("--login-script needs --requester playwright or auto".to_owned());
-    }
-    let build = |id: &str| {
-        let mut config = options.requester_config(id);
-        if id == "playwright"
-            && let (Some(steps), Some(object)) = (&login, config.as_object_mut())
-        {
-            object.insert("login".to_owned(), steps.clone());
-        }
-        registry
-            .build(id, &config, shared)
-            .map_err(|error| error.to_string())
-    };
-    if options.requester != AUTO_ID {
-        return build(&options.requester);
-    }
-    let fast = build("wreq")?;
-    let browser = build("playwright").map_err(|error| {
-        format!("--requester auto needs a build with browser support ({error})")
-    })?;
-    Ok(Arc::new(HybridRequester::new(fast, browser)))
-}
-
 fn usage_error(message: &str) -> ExitCode {
     eprintln!("error: {message}");
     ExitCode::from(EXIT_USAGE)
@@ -308,7 +275,7 @@ impl Run {
             );
             // Only a finished copy is worth packing.
             if zip && summary.stopped.is_none() {
-                match crate::archive::zip_copy(&output) {
+                match mc_cli::archive::zip_copy(&output) {
                     Ok(path) => println!("Zip: {}", path.display()),
                     Err(error) => return usage_error(&format!("could not write the zip: {error}")),
                 }
@@ -433,6 +400,9 @@ async fn print_events(mut events: broadcast::Receiver<CrawlEvent>) {
                 true,
             ),
             Ok(CrawlEvent::Stopping { reason }) => say(format!("stopping: {reason}"), true),
+            Ok(CrawlEvent::SitemapRead { url, pages }) => {
+                say(format!("sitemap {url} ({pages} pages)"), false)
+            }
             Ok(CrawlEvent::Rewriting { documents }) => {
                 if let Some(bar) = &bar {
                     bar.set_message(format!("rewriting links in {documents} documents"));

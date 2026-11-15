@@ -4786,11 +4786,11 @@ name = "mc-gui"
 version = "0.1.0"
 dependencies = [
  "gpui-kit",
+ "mc-cli",
  "mc-core",
  "mc-fixtures",
  "mc-requester",
  "mc-requester-playwright",
- "mc-requester-wreq",
  "mc-store",
  "serde",
  "serde_json",

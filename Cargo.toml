@@ -9,6 +9,7 @@ rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
+mc-cli = { path = "crates/mc-cli" }
 mc-core = { path = "crates/mc-core" }
 mc-extract = { path = "crates/mc-extract" }
 mc-fixtures = { path = "fixtures" }

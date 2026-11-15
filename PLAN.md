@@ -337,6 +337,22 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - The CLI draws an indicatif progress bar on a terminal; `-j`/`--workers` alias `--concurrency`.
   - Checked: 122 tests pass and clippy is clean. Screenshots of the running app show Polite mode with all four workers in WAIT, and then the finished copy. The CLI bar was checked in a pseudo-terminal.
 
+- **Competitor gaps, top group (2026-11-15):**
+  - Sitemap seeding (`--sitemaps`; on by default in the app):
+    - Reads the `Sitemap:` lines of robots.txt, else `/sitemap.xml`. Handles sitemap indexes, gzipped XML and plain-text lists.
+    - Capped at 200 files and 200,000 pages.
+    - The pages it finds are queued one level below the seed. Scope and robots.txt still apply, and the robots.txt it reads is reused by the crawl.
+  - Bandwidth limit (`--limit-rate 500K`): a shared limiter makes each worker wait its share of time after a body arrives. Measured on the static-blog fixture: 3.3 KiB took 3.7 s at 1K, against 0.19 s unlimited.
+  - App parity with the CLI:
+    - `mc-cli` is now also a library (options, session, requesters, zip), and the app builds its copies from the same `CrawlOptions`, so `resume` and `update` repeat every choice made in the app.
+    - New Limits, Auth and Output tabs, plus "save without following links" in Rules. Form errors are explained before anything starts.
+  - Browser login from the app: Chromium opens at the site, and **Done** saves the cookies into the copy's state folder. Writing the cookie file now creates missing folders, which also fixes `mistercopy login --save` into a new directory.
+  - Checked:
+    - 129 tests pass, including a headless UI test that sets max pages and zip output and checks both reach the crawl.
+    - Clippy is clean with and without `browser`.
+    - The real window was driven over X: Limits, Auth and Output tabs, a 1K-capped copy, and the browser login opening and saving.
+    - Not checked: typing real credentials into the opened Chromium. It opened as a Wayland window, which the X test driver can't type into.
+
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.
 - **Playwright from Rust** still needs the Playwright driver plus Chromium (about 150 MB+ downloaded on demand). If that proves painful, `chromiumoxide` (pure-Rust CDP) is the drop-in alternative requester. The trait makes the swap cheap.

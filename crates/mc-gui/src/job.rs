@@ -3,15 +3,15 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use mc_cli::archive::zip_copy;
+use mc_cli::options::{CrawlOptions, SessionArgs, parse_rate};
+use mc_cli::requesters::{build_requester, registry};
 use mc_core::{
-    CrawlConfig, CrawlEvent, CrawlStatus, CrawlSummary, Crawler, REPORT_HTML, StopHandle,
-    human_bytes,
+    CrawlEvent, CrawlStatus, CrawlSummary, Crawler, REPORT_HTML, StopHandle, human_bytes,
 };
-use mc_requester::{Requester, RequesterFactory, SharedResources, Url};
-use mc_requester_wreq::WreqFactory;
+use mc_requester::{AUTO_ID, Url};
 use mc_store::SqliteStore;
 use tokio::sync::{broadcast, oneshot};
 
@@ -27,6 +27,9 @@ pub const MAX_WORKERS: usize = 32;
 const META_SEED: &str = "seed";
 const META_OPTIONS: &str = "options";
 
+/// Everything the window's form holds, as typed. [`Settings::options`]
+/// turns it into the command line's options, so a copy started here saves
+/// the same choices `mistercopy resume` and `update` read back.
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub url: String,
@@ -41,8 +44,178 @@ pub struct Settings {
     pub exclude: String,
     /// Fetch URLs matching this regex even outside the site (empty: none).
     pub include: String,
+    /// Save URLs matching this regex without following their links.
+    pub download_only: String,
+    // Limits, each empty for none.
+    pub max_depth: String,
+    pub max_urls: String,
+    pub max_size_mb: String,
+    pub max_time_min: String,
+    pub max_file_mb: String,
+    /// e.g. `500K` or `2M`.
+    pub limit_rate: String,
+    /// Other hosts of the same site, separated by commas or spaces.
+    pub aliases: String,
+    pub external_assets: bool,
+    pub sitemaps: bool,
+    // Session: used for this run only, never saved.
+    pub auth_user: String,
+    pub auth_password: String,
+    /// `Name: value`, one per line.
+    pub headers: String,
+    pub cookies: String,
+    pub proxy: String,
+    // Extra output.
+    pub warc: bool,
+    pub zip: bool,
+    pub replay: bool,
     /// Re-check a finished copy instead of starting over.
     pub update: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            output: default_output(),
+            render_js: false,
+            workers: 4,
+            per_host_delay: Speed::default().delay(),
+            respect_robots: true,
+            exclude: String::new(),
+            include: String::new(),
+            download_only: String::new(),
+            max_depth: String::new(),
+            max_urls: String::new(),
+            max_size_mb: String::new(),
+            max_time_min: String::new(),
+            max_file_mb: "512".to_owned(),
+            limit_rate: String::new(),
+            aliases: String::new(),
+            external_assets: false,
+            sitemaps: true,
+            auth_user: String::new(),
+            auth_password: String::new(),
+            headers: String::new(),
+            cookies: String::new(),
+            proxy: String::new(),
+            warc: false,
+            zip: false,
+            replay: false,
+            update: false,
+        }
+    }
+}
+
+/// An optional number field: empty is `None`.
+fn number<T: std::str::FromStr>(text: &str, label: &str) -> Result<Option<T>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    text.parse()
+        .map(Some)
+        .map_err(|_| format!("{label} must be a whole number, not “{text}”."))
+}
+
+fn pattern(text: &str) -> Vec<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![text.to_owned()]
+    }
+}
+
+impl Settings {
+    /// The crawl options (saved with the copy) and session (not saved) this
+    /// form describes, for the site `seed` copied into `output`.
+    pub fn options(
+        &self,
+        seed: &Url,
+        output: &Path,
+    ) -> Result<(CrawlOptions, SessionArgs), String> {
+        let mut options = CrawlOptions {
+            requester: if self.render_js { AUTO_ID } else { "wreq" }.to_owned(),
+            concurrency: self.workers.clamp(1, MAX_WORKERS),
+            delay_ms: self.per_host_delay.as_millis() as u64,
+            ignore_robots: !self.respect_robots,
+            exclude: pattern(&self.exclude),
+            include: pattern(&self.include),
+            download_only: pattern(&self.download_only),
+            max_depth: number(&self.max_depth, "Max depth")?,
+            max_urls: number(&self.max_urls, "Max pages")?,
+            max_size_mb: number(&self.max_size_mb, "Stop after (MB)")?,
+            max_time_secs: number::<u64>(&self.max_time_min, "Stop after (minutes)")?
+                .map(|minutes| minutes.saturating_mul(60)),
+            aliases: self
+                .aliases
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|host| !host.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            external_assets: self.external_assets,
+            sitemaps: self.sitemaps,
+            zip: self.zip,
+            replay: self.replay && self.render_js,
+            ..CrawlOptions::default()
+        };
+        if let Some(mb) = number(&self.max_file_mb, "Skip files over (MB)")? {
+            options.max_file_mb = mb;
+        }
+        let rate = self.limit_rate.trim();
+        if !rate.is_empty() {
+            options.limit_rate =
+                Some(parse_rate(rate).map_err(|e| format!("Bandwidth limit: {e}."))?);
+        }
+        let proxy = self.proxy.trim();
+        if !proxy.is_empty() {
+            options.proxy = Some(Url::parse(proxy).map_err(|_| {
+                format!("“{proxy}” isn't a proxy address like socks5://host:1080.")
+            })?);
+        }
+        if self.warc {
+            let host = seed.host_str().unwrap_or("copy");
+            options.warc = Some(output.join(format!("{host}.warc.gz")));
+        }
+        // Checked now, so a bad pattern is reported before anything starts.
+        options.crawl_config(seed.clone(), output.to_path_buf())?;
+
+        let mut session = SessionArgs::default();
+        let user = self.auth_user.trim();
+        if !user.is_empty() {
+            let host = seed.host_str().unwrap_or_default();
+            session.auth = vec![format!("{host}={user}:{}", self.auth_password)];
+        }
+        session.headers = self
+            .headers
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let cookies = self.cookies.trim();
+        if !cookies.is_empty() {
+            session.cookies = Some(expand_home(cookies));
+        }
+        Ok((options, session))
+    }
+}
+
+/// `~/x` as a path under the home directory.
+pub fn expand_home(text: &str) -> PathBuf {
+    match text.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .map(|home| PathBuf::from(home).join(rest))
+            .unwrap_or_else(|| PathBuf::from(text)),
+        None => PathBuf::from(text),
+    }
+}
+
+/// Where a browser login made from the window keeps its cookies: inside the
+/// copy's state folder, which zips and reports leave out.
+pub fn login_cookies(output: &Path) -> PathBuf {
+    output.join(mc_core::STATE_DIR).join("login-cookies.txt")
 }
 
 /// How hard to press the site: the gap between two requests to one host.
@@ -119,30 +292,41 @@ pub fn parse(settings: &Settings) -> Result<(Url, PathBuf), String> {
     if folder.is_empty() {
         return Err("Choose a folder to save the copy in.".to_owned());
     }
-    let output = match folder.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME")
-            .map(|home| PathBuf::from(home).join(rest))
-            .unwrap_or_else(|| PathBuf::from(folder)),
-        None => PathBuf::from(folder),
-    };
-    Ok((url, output))
+    Ok((url, expand_home(folder)))
 }
 
 /// A copy in progress.
 pub struct Running {
     pub stop: StopHandle,
     pub events: broadcast::Receiver<CrawlEvent>,
-    pub done: oneshot::Receiver<Result<CrawlSummary, String>>,
+    pub done: oneshot::Receiver<Outcome>,
     pub output: PathBuf,
     /// An unfinished copy of the same site was found and is being continued.
     pub resumed: bool,
     pub workers: usize,
 }
 
+/// How a copy ended: the crawl's own result, and the zip if one was asked
+/// for and the copy finished.
+pub struct Outcome {
+    pub result: Result<CrawlSummary, String>,
+    pub zip: Option<Result<PathBuf, String>>,
+}
+
 pub fn start(settings: &Settings) -> Result<Running, String> {
     let (seed, output) = parse(settings)?;
-    let shared = SharedResources::default();
-    let requester = requester(settings.render_js, &shared)?;
+    let (options, session) = settings.options(&seed, &output)?;
+    let mut config = options.crawl_config(seed.clone(), output.clone())?;
+    let shared = options.shared_resources();
+    session.apply(&mut config, &shared)?;
+    let requester = build_requester(&registry(), &options, session.login_steps()?, &shared)
+        .map_err(|e| {
+            if settings.render_js && !browser_support() {
+                "This build can't render JavaScript.".to_owned()
+            } else {
+                e
+            }
+        })?;
 
     let mut store = SqliteStore::open(&output).map_err(|e| e.to_string())?;
     // Continue an unfinished copy of the same site; otherwise start fresh.
@@ -152,7 +336,6 @@ pub fn start(settings: &Settings) -> Result<Running, String> {
         Ok(Some(CrawlStatus::Running | CrawlStatus::Stopped))
     );
     let complete = matches!(store.status(), Ok(Some(CrawlStatus::Complete)));
-    let rules = crate::insight::rules(&settings.exclude, &settings.include)?;
     let resumed = same_site && unfinished;
     if settings.update {
         if !(same_site && complete) {
@@ -168,36 +351,18 @@ pub fn start(settings: &Settings) -> Result<Running, String> {
             .map_err(|e| e.to_string())?;
     }
     // Saved so the command line's `resume` and `update` repeat these choices.
-    let list = |pattern: &str| {
-        let pattern = pattern.trim();
-        if pattern.is_empty() {
-            vec![]
-        } else {
-            vec![pattern.to_owned()]
-        }
-    };
-    let options = serde_json::json!({
-        "requester": if settings.render_js { "auto" } else { "wreq" },
-        "exclude": list(&settings.exclude),
-        "include": list(&settings.include),
-        "concurrency": settings.workers,
-        "delay_ms": settings.per_host_delay.as_millis() as u64,
-        "ignore_robots": !settings.respect_robots,
-    });
+    let saved = serde_json::to_string(&options).map_err(|e| e.to_string())?;
     store
-        .set_meta(META_OPTIONS, &options.to_string())
+        .set_meta(META_OPTIONS, &saved)
         .map_err(|e| e.to_string())?;
 
-    let mut config = CrawlConfig::new(seed, &output);
-    config.concurrency = settings.workers.clamp(1, MAX_WORKERS);
-    config.per_host_delay = settings.per_host_delay;
-    config.respect_robots = settings.respect_robots;
-    config.rules = rules;
     let workers = config.concurrency;
+    let zip = options.zip;
     let crawler = Crawler::new(config, requester).with_store(store);
     let stop = crawler.stop_handle();
     let events = crawler.subscribe();
     let (finished, done) = oneshot::channel();
+    let zip_dir = output.clone();
     std::thread::Builder::new()
         .name("mistercopy-crawl".to_owned())
         .spawn(move || {
@@ -206,7 +371,10 @@ pub fn start(settings: &Settings) -> Result<Running, String> {
                 .build()
                 .map_err(|e| e.to_string())
                 .and_then(|runtime| runtime.block_on(crawler.run()).map_err(|e| e.to_string()));
-            let _ = finished.send(result);
+            // Only a finished copy is worth packing.
+            let zip = (zip && matches!(&result, Ok(summary) if summary.stopped.is_none()))
+                .then(|| zip_copy(&zip_dir).map_err(|e| e.to_string()));
+            let _ = finished.send(Outcome { result, zip });
         })
         .map_err(|e| format!("could not start the copy: {e}"))?;
 
@@ -218,24 +386,6 @@ pub fn start(settings: &Settings) -> Result<Running, String> {
         resumed,
         workers,
     })
-}
-
-fn requester(render_js: bool, shared: &SharedResources) -> Result<Arc<dyn Requester>, String> {
-    let wreq = WreqFactory
-        .build(&serde_json::json!({}), shared)
-        .map_err(|e| e.to_string())?;
-    if !render_js {
-        return Ok(wreq);
-    }
-    #[cfg(feature = "browser")]
-    {
-        let browser = mc_requester_playwright::PlaywrightFactory
-            .build(&serde_json::json!({}), shared)
-            .map_err(|e| e.to_string())?;
-        Ok(Arc::new(mc_requester::HybridRequester::new(wreq, browser)))
-    }
-    #[cfg(not(feature = "browser"))]
-    Err("This build can't render JavaScript.".to_owned())
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -452,6 +602,9 @@ impl Progress {
                 self.done = *done;
                 self.total = *total;
             }
+            CrawlEvent::SitemapRead { url, pages } => {
+                self.info(&format!("Sitemap {url}: {pages} pages listed"));
+            }
             CrawlEvent::Skipped { .. } => {}
         }
     }
@@ -508,6 +661,16 @@ impl Progress {
         }
     }
 
+    /// Notes where the zip went, or why it couldn't be written.
+    pub fn zipped(&mut self, zip: Result<PathBuf, String>) {
+        match zip {
+            Ok(path) => self.info(&format!("Zip saved: {}", path.display())),
+            Err(error) => {
+                self.push(LineKind::Failed, "Could not write the zip", error);
+            }
+        }
+    }
+
     pub fn status(&self) -> String {
         match &self.phase {
             Phase::Idle => "Ready.".to_owned(),
@@ -545,14 +708,48 @@ mod tests {
         Settings {
             url: url.to_owned(),
             output: output.to_owned(),
-            render_js: false,
-            workers: 4,
             per_host_delay: Duration::ZERO,
-            respect_robots: true,
-            exclude: String::new(),
-            include: String::new(),
-            update: false,
+            ..Settings::default()
         }
+    }
+
+    #[test]
+    fn turns_the_form_into_options() {
+        let seed = Url::parse("https://s.test/").unwrap();
+        let out = Path::new("/out");
+        let mut form = Settings {
+            workers: 99,
+            max_depth: " 3 ".to_owned(),
+            max_time_min: "2".to_owned(),
+            limit_rate: "500K".to_owned(),
+            aliases: "www.s.test, cdn.s.test".to_owned(),
+            auth_user: "ann".to_owned(),
+            auth_password: "p:w".to_owned(),
+            headers: "X-One: 1\n\n  X-Two: 2 ".to_owned(),
+            warc: true,
+            replay: true,
+            ..settings("https://s.test/", "/out")
+        };
+        let (options, session) = form.options(&seed, out).unwrap();
+        assert_eq!(options.concurrency, MAX_WORKERS);
+        assert_eq!(options.max_depth, Some(3));
+        assert_eq!(options.max_time_secs, Some(120));
+        assert_eq!(options.limit_rate, Some(512_000));
+        assert_eq!(options.aliases, ["www.s.test", "cdn.s.test"]);
+        assert!(options.sitemaps);
+        assert!(!options.replay, "replay needs the browser");
+        assert_eq!(options.warc, Some(PathBuf::from("/out/s.test.warc.gz")));
+        assert_eq!(session.auth, ["s.test=ann:p:w"]);
+        assert_eq!(session.headers, ["X-One: 1", "X-Two: 2"]);
+
+        form.max_urls = "lots".to_owned();
+        assert!(form.options(&seed, out).unwrap_err().contains("Max pages"));
+        form.max_urls.clear();
+        form.limit_rate = "fast".to_owned();
+        assert!(form.options(&seed, out).unwrap_err().contains("Bandwidth"));
+        form.limit_rate.clear();
+        form.exclude = "(".to_owned();
+        assert!(form.options(&seed, out).unwrap_err().contains("regex"));
     }
 
     #[test]
