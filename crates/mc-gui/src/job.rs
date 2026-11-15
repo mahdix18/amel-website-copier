@@ -325,16 +325,22 @@ pub fn browser_support() -> bool {
     cfg!(feature = "browser")
 }
 
+/// The folder under the home directory that copies go to by default. Not
+/// plain `MisterCopy`, which is also the usual name of a checkout of this
+/// project.
+pub const DEFAULT_FOLDER: &str = "MisterCopy Copies";
+
 /// Where copies go unless the user picks another folder.
 pub fn default_output() -> String {
     std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|home| {
             PathBuf::from(home)
-                .join("MisterCopy")
+                .join(DEFAULT_FOLDER)
                 .to_string_lossy()
                 .into_owned()
         })
-        .unwrap_or_else(|| "MisterCopy".to_owned())
+        .unwrap_or_else(|| DEFAULT_FOLDER.to_owned())
 }
 
 /// Checks the form. Accepts a bare host (`example.com`) as `https://`.
@@ -983,6 +989,13 @@ mod tests {
         form.limit_rate.clear();
         form.exclude = "(".to_owned();
         assert!(form.options(&seed, out).unwrap_err().contains("regex"));
+    }
+
+    #[test]
+    fn copies_default_to_their_own_folder() {
+        let output = PathBuf::from(default_output());
+        assert_eq!(output.file_name().unwrap(), DEFAULT_FOLDER);
+        assert_ne!(output.file_name().unwrap(), "MisterCopy");
     }
 
     #[test]
