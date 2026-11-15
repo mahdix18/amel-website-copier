@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Icon, IconName, Selectable, Sizable};
@@ -53,6 +54,8 @@ pub fn bind_keys(cx: &mut App) {
 pub enum Tab {
     /// Folder, workers, speed and switches.
     Copy,
+    /// The browser to impersonate, and JavaScript rendering.
+    Browser,
     /// Depth, size, time and bandwidth limits; sitemaps and aliases.
     Limits,
     Rules,
@@ -98,6 +101,11 @@ pub struct CopyWindow {
     test_url: Entity<InputState>,
     filter: Entity<InputState>,
     render_js: bool,
+    /// Browser profile and platform impersonated; `None` for the defaults.
+    profile: Option<String>,
+    platform: Option<String>,
+    /// The profiles by browser, read once.
+    families: Vec<(String, Vec<String>)>,
     /// Gap between requests to one host. Polite by default.
     pub speed: Speed,
     /// Parallel downloads.
@@ -106,6 +114,7 @@ pub struct CopyWindow {
     fields: Fields,
     external_assets: bool,
     sitemaps: bool,
+    verify: bool,
     warc: bool,
     zip: bool,
     replay: bool,
@@ -234,12 +243,16 @@ impl CopyWindow {
             test_url: input("https://example.com/some/page", window, cx),
             filter,
             render_js: prefs.render_js && job::browser_support(),
+            profile: prefs.profile.clone(),
+            platform: prefs.platform.clone(),
+            families: job::profile_families(),
             speed: prefs.speed,
             workers: prefs.workers,
             respect_robots: prefs.respect_robots,
             fields,
             external_assets: false,
             sitemaps: prefs.sitemaps,
+            verify: prefs.verify,
             warc: false,
             zip: false,
             replay: false,
@@ -275,7 +288,10 @@ impl CopyWindow {
             speed: self.speed,
             respect_robots: self.respect_robots,
             render_js: self.render_js,
+            profile: self.profile.clone(),
+            platform: self.platform.clone(),
             sitemaps: self.sitemaps,
+            verify: self.verify,
             dark: Look::global(cx).dark,
         };
         let _ = prefs.save(self.prefs_path.as_ref());
@@ -420,6 +436,8 @@ impl CopyWindow {
             url: text(&self.url),
             output: text(&self.output),
             render_js: self.render_js,
+            profile: self.profile.clone(),
+            platform: self.platform.clone(),
             workers: self.workers,
             per_host_delay: self.speed.delay(),
             respect_robots: self.respect_robots,
@@ -446,6 +464,7 @@ impl CopyWindow {
             warc: self.warc,
             zip: self.zip,
             replay: self.replay,
+            verify: self.verify,
             update,
         }
     }
@@ -790,6 +809,14 @@ impl CopyWindow {
                 |this, cx| this.show(Tab::Copy, cx),
             ))
             .child(item(
+                "rail-browser",
+                IconName::Frame,
+                "Browser",
+                self.tab == Tab::Browser,
+                cx,
+                |this, cx| this.show(Tab::Browser, cx),
+            ))
+            .child(item(
                 "rail-limits",
                 IconName::Cpu,
                 "Limits",
@@ -1017,10 +1044,16 @@ impl CopyWindow {
             (1, _) => "via 1 proxy".to_owned(),
             (n, _) => format!("via {n} proxies"),
         };
+        let profile = job::pretty_profile(&self.current_profile());
+        let platform = self
+            .platform
+            .as_deref()
+            .map(|p| format!(" on {}", job::pretty_profile(p)))
+            .unwrap_or_default();
         let mode = if self.render_js {
-            format!("Chromium + HTTP · {route}")
+            format!("as {profile}{platform} + Chromium · {route}")
         } else {
-            format!("HTTP (Chrome TLS) · {route}")
+            format!("as {profile}{platform} · {route}")
         };
         div()
             .h(px(26.))
@@ -1077,10 +1110,11 @@ impl CopyWindow {
 
     fn request_bar(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
         let running = self.progress.running();
+        let profile = job::pretty_profile(&self.current_profile()).to_uppercase();
         let (method, method_color) = if self.render_js {
-            ("AUTO", look.info)
+            (format!("{profile} + JS"), look.info)
         } else {
-            ("HTTP", look.success)
+            (profile, look.success)
         };
         let method_chip = div()
             .id("requester")
@@ -1097,19 +1131,15 @@ impl CopyWindow {
             .font_weight(FontWeight::BOLD)
             .text_color(method_color)
             .child(method)
-            .when(job::browser_support() && !running, |el| {
-                el.cursor_pointer()
-                    .hover(|el| el.bg(look.border))
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .xsmall()
-                            .text_color(look.muted),
-                    )
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.render_js = !this.render_js;
-                        this.changed(cx);
-                    }))
-            });
+            .cursor_pointer()
+            .hover(|el| el.bg(look.border))
+            .child(
+                Icon::new(IconName::ChevronDown)
+                    .xsmall()
+                    .text_color(look.muted),
+            )
+            // Opens the browser settings, like a method picker.
+            .on_click(cx.listener(|this, _, _, cx| this.show(Tab::Browser, cx)));
         let action = if running {
             Button::new("stop")
                 .danger()
@@ -1209,6 +1239,7 @@ impl CopyWindow {
             .border_b_1()
             .border_color(look.border)
             .child(tab("tab-copy", "Options", Tab::Copy, 0))
+            .child(tab("tab-browser", "Browser", Tab::Browser, 0))
             .child(tab("tab-limits", "Limits", Tab::Limits, limits))
             .child(tab("tab-rules", "Rules", Tab::Rules, rules))
             .child(tab("tab-auth", "Auth", Tab::Auth, auth))
@@ -1294,7 +1325,6 @@ impl CopyWindow {
                     })
                     .child(speed.label())
             }));
-        let browser = job::browser_support();
         div()
             .flex()
             .flex_col()
@@ -1335,30 +1365,24 @@ impl CopyWindow {
                     .child(labelled("Speed", Some(self.speed.hint()), speeds, look)),
             )
             .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_6()
-                    .child(
-                        Switch::new("robots")
-                            .checked(self.respect_robots)
-                            .label("Respect robots.txt")
-                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                this.respect_robots = *checked;
-                                this.changed(cx);
-                            })),
-                    )
-                    .when(browser, |el| {
-                        el.child(
-                            Switch::new("render-js")
-                                .checked(self.render_js)
-                                .label("Render JavaScript with Chromium")
-                                .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                                    this.render_js = *checked;
-                                    this.changed(cx);
-                                })),
-                        )
-                    }),
+                div().flex().flex_wrap().gap_6().child(
+                    Switch::new("robots")
+                        .checked(self.respect_robots)
+                        .label("Respect robots.txt")
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.respect_robots = *checked;
+                            this.changed(cx);
+                        })),
+                ),
+            )
+            .child(
+                Checkbox::new("verify")
+                    .checked(self.verify)
+                    .label("Check for missed files after downloading, and fetch them again")
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.verify = *checked;
+                        this.changed(cx);
+                    })),
             )
             .into_any_element()
     }
@@ -1783,6 +1807,173 @@ impl CopyWindow {
                 ))
             })
             .into_any_element()
+    }
+
+    fn browser_view(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let picker = self.impersonation(look, cx);
+        div()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(picker)
+            .when(job::browser_support(), |el| {
+                el.child(
+                    Switch::new("render-js")
+                        .checked(self.render_js)
+                        .label("Also render JavaScript-built pages in Chromium")
+                        .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                            this.render_js = *checked;
+                            this.changed(cx);
+                        })),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The profile copies will use.
+    fn current_profile(&self) -> String {
+        self.profile.clone().unwrap_or_else(job::default_profile)
+    }
+
+    /// Browser, version and platform to impersonate.
+    fn impersonation(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.current_profile();
+        let family = current.split('_').next().unwrap_or_default().to_owned();
+        let running = self.progress.running();
+        let segment = |id: SharedString, label: String, active: bool| {
+            div()
+                .id(id.clone())
+                .test_support()
+                .aria_label(SharedString::from(label.clone()))
+                .px_3()
+                .py(px(3.))
+                .rounded(px(4.))
+                .text_sm()
+                .whitespace_nowrap()
+                .when(active, |el| el.bg(look.surface).text_color(look.text))
+                .when(!active, |el| el.text_color(look.muted))
+                .when(!running, |el| {
+                    el.cursor_pointer().hover(|el| el.text_color(look.text))
+                })
+                .child(label)
+        };
+        let group = || {
+            div()
+                .flex()
+                .flex_wrap()
+                .p(px(2.))
+                .rounded_md()
+                .bg(look.raised)
+                .border_1()
+                .border_color(look.border)
+        };
+        let browsers = group().children(self.families.iter().map(|(name, profiles)| {
+            // A browser starts at its newest desktop profile (`safari_26.4`,
+            // not `safari_ios_26.2`).
+            let newest = profiles
+                .iter()
+                .rev()
+                .find(|p| p.split('_').count() == 2)
+                .or(profiles.last())
+                .cloned()
+                .unwrap_or_default();
+            segment(
+                SharedString::from(format!("browser-{name}")),
+                job::pretty_profile(name),
+                *name == family,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.progress.running() {
+                    this.profile = Some(newest.clone());
+                    this.changed(cx);
+                }
+            }))
+        }));
+        let versions: Vec<String> = self
+            .families
+            .iter()
+            .find(|(name, _)| *name == family)
+            .map(|(_, profiles)| profiles.clone())
+            .unwrap_or_default();
+        let index = versions.iter().position(|p| *p == current).unwrap_or(0);
+        let step =
+            |id: &'static str, icon: IconName, to: Option<String>, cx: &mut Context<Self>| {
+                Button::new(id)
+                    .ghost()
+                    .small()
+                    .icon(icon)
+                    .disabled(running || to.is_none())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(profile) = &to {
+                            this.profile = Some(profile.clone());
+                            this.changed(cx);
+                        }
+                    }))
+            };
+        let older = index.checked_sub(1).and_then(|i| versions.get(i).cloned());
+        let newer = versions.get(index + 1).cloned();
+        let version_label = current
+            .split_once('_')
+            .map(|(_, rest)| rest.replace('_', " "))
+            .unwrap_or_default();
+        let version = div()
+            .flex()
+            .items_center()
+            .h(px(30.))
+            .rounded_md()
+            .border_1()
+            .border_color(look.border)
+            .bg(look.raised)
+            .child(step("profile-older", IconName::ChevronLeft, older, cx))
+            .child(
+                div()
+                    .id("profile-version")
+                    .test_support()
+                    .aria_label(SharedString::from(format!("Profile: {current}")))
+                    .min_w(px(72.))
+                    .flex()
+                    .justify_center()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(version_label),
+            )
+            .child(step("profile-newer", IconName::ChevronRight, newer, cx));
+        let platforms = group().children(
+            std::iter::once((None, "Auto".to_owned()))
+                .chain(mc_requester_wreq::PLATFORMS.iter().map(|p| {
+                    let label = match *p {
+                        "macos" => "macOS".to_owned(),
+                        "ios" => "iOS".to_owned(),
+                        other => job::pretty_profile(other),
+                    };
+                    (Some((*p).to_owned()), label)
+                }))
+                .map(|(value, label)| {
+                    let id = SharedString::from(format!(
+                        "platform-{}",
+                        value.as_deref().unwrap_or("auto")
+                    ));
+                    let active = self.platform == value;
+                    segment(id, label, active).on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.progress.running() {
+                            this.platform = value.clone();
+                            this.changed(cx);
+                        }
+                    }))
+                }),
+        );
+        labelled(
+            "Impersonate",
+            Some("TLS, HTTP/2 and headers match this browser, so sites treat the copy like a visitor"),
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(div().flex().flex_wrap().gap_2().child(browsers).child(version))
+                .child(platforms),
+            look,
+        )
+        .into_any_element()
     }
 
     fn rules_view(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
@@ -2456,6 +2647,7 @@ impl Render for CopyWindow {
         let view = match self.tab {
             Tab::Copy => self.options_view(&look, cx),
             Tab::Rules => self.rules_view(&look, cx),
+            Tab::Browser => self.browser_view(&look, cx),
             Tab::Limits => self.limits_view(&look, cx),
             Tab::Auth => self.auth_view(&look, cx),
             Tab::Proxy => self.proxy_view(&look, cx),

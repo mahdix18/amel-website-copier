@@ -21,6 +21,7 @@ mc-cli.workspace = true
 mc-core.workspace = true
 mc-requester.workspace = true
 mc-requester-playwright = { workspace = true, optional = true }
+mc-requester-wreq.workspace = true
 mc-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true

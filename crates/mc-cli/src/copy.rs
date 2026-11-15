@@ -91,6 +91,7 @@ pub async fn copy(args: CopyArgs, registry: &RequesterRegistry) -> ExitCode {
         .options
         .crawl_config(args.url.clone(), dir.clone())
         .and_then(|_| args.options.proxy_config())
+        .and_then(|_| args.options.check_impersonation())
     {
         return usage_error(&message);
     }
@@ -411,6 +412,17 @@ async fn print_events(mut events: broadcast::Receiver<CrawlEvent>) {
                 true,
             ),
             Ok(CrawlEvent::Stopping { reason }) => say(format!("stopping: {reason}"), true),
+            Ok(CrawlEvent::Verifying { files, retrying }) => say(
+                format!("checking {files} saved files; fetching {retrying} missed URLs again"),
+                false,
+            ),
+            Ok(CrawlEvent::Verified {
+                recovered,
+                still_missing,
+            }) => say(
+                format!("check done: {recovered} recovered, {still_missing} still missing"),
+                still_missing > 0,
+            ),
             Ok(CrawlEvent::SitemapRead { url, pages }) => {
                 say(format!("sitemap {url} ({pages} pages)"), false)
             }
@@ -489,6 +501,15 @@ fn print_summary(summary: &CrawlSummary, dry_run: bool) {
     );
     if let Some(reason) = summary.stopped {
         eprintln!("Stopped early: {reason}.");
+    }
+    if let Some(check) = &summary.verification {
+        println!(
+            "Checked {} files: {} missed, {} recovered, {} still missing.",
+            check.files,
+            check.retried,
+            check.recovered,
+            check.still_missing.len()
+        );
     }
     if !summary.failed.is_empty() {
         eprintln!("Failures:");

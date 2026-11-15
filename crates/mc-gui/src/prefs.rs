@@ -14,8 +14,13 @@ pub struct Prefs {
     pub speed: Speed,
     pub respect_robots: bool,
     pub render_js: bool,
+    /// Browser profile and platform to impersonate; `None` for defaults.
+    pub profile: Option<String>,
+    pub platform: Option<String>,
     /// Also queue the pages the site's sitemaps list.
     pub sitemaps: bool,
+    /// Check for missed files after each copy.
+    pub verify: bool,
     pub dark: bool,
 }
 
@@ -26,7 +31,10 @@ impl Default for Prefs {
             speed: Speed::default(),
             respect_robots: true,
             render_js: false,
+            profile: None,
+            platform: None,
             sitemaps: true,
+            verify: true,
             dark: true,
         }
     }

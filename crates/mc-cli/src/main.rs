@@ -82,6 +82,30 @@ enum RequestersCommand {
         #[arg(long)]
         json: bool,
     },
+    /// List the browser profiles `--profile` can impersonate, and the
+    /// platforms `--platform` accepts.
+    Profiles,
+}
+
+/// One line per browser: its profiles, oldest first.
+fn list_profiles() -> ExitCode {
+    let default = mc_requester_wreq::default_profile();
+    let mut families: Vec<(String, Vec<String>)> = Vec::new();
+    for name in mc_requester_wreq::profiles() {
+        let family = name.split('_').next().unwrap_or_default().to_owned();
+        match families.iter_mut().find(|(f, _)| *f == family) {
+            Some((_, names)) => names.push(name),
+            None => families.push((family, vec![name])),
+        }
+    }
+    for (family, names) in families {
+        println!("{family:<8} {}", names.join(" "));
+    }
+    println!(
+        "\nDefault: {default}. Platforms: {}.",
+        mc_requester_wreq::PLATFORMS.join(", ")
+    );
+    ExitCode::SUCCESS
 }
 
 #[cfg(feature = "browser")]
@@ -153,6 +177,9 @@ async fn main() -> ExitCode {
         Command::Requesters {
             command: RequestersCommand::List { json },
         } => list_requesters(&registry().list(), json),
+        Command::Requesters {
+            command: RequestersCommand::Profiles,
+        } => list_profiles(),
         Command::Browsers { command } => browsers(command).await,
         Command::Login(args) => login(args).await,
         Command::Serve { dir, port } => serve(&dir, port).await,

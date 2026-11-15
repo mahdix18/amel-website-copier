@@ -295,3 +295,53 @@ fn limits_and_output_tabs_reach_the_crawl(cx: &mut TestAppContext) {
         .count();
     assert_eq!(zips, 1, "the finished copy was zipped");
 }
+
+#[gpui_kit::test]
+fn picks_a_browser_to_impersonate(cx: &mut TestAppContext) {
+    let config = tempfile::tempdir().unwrap();
+    let (handle, _) = open(cx, config.path());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        assert!(
+            window.try_find("verify").is_some(),
+            "the missed-files checkbox"
+        );
+        // The requester chip opens the Browser tab.
+        window.click("requester", cx);
+        assert_eq!(
+            window.find("profile-version").label(),
+            Some("Profile: chrome_149")
+        );
+        window.click("browser-firefox", cx);
+        let label = window
+            .find("profile-version")
+            .label()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(label.starts_with("Profile: firefox_"), "{label}");
+        assert!(
+            !label.contains("android") && !label.contains("private"),
+            "{label}"
+        );
+        window.click("profile-older", cx);
+        let older = window
+            .find("profile-version")
+            .label()
+            .unwrap_or_default()
+            .to_owned();
+        assert_ne!(older, label, "the stepper moves to an older version");
+        window.click("platform-windows", cx);
+        assert!(
+            window
+                .find("requester")
+                .label()
+                .unwrap_or_default()
+                .contains("FIREFOX")
+        );
+    })
+    .unwrap();
+    // The choice is remembered for the next launch.
+    let prefs = std::fs::read_to_string(config.path().join("prefs.json")).unwrap();
+    assert!(prefs.contains("\"platform\": \"windows\""), "{prefs}");
+    assert!(prefs.contains("firefox_"), "{prefs}");
+}

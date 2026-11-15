@@ -35,6 +35,10 @@ pub struct Settings {
     pub url: String,
     pub output: String,
     pub render_js: bool,
+    /// Browser profile to impersonate (`chrome_149`…); `None` for the default.
+    pub profile: Option<String>,
+    /// Platform to present (`windows`…); `None` for the profile's own.
+    pub platform: Option<String>,
     /// Parallel downloads.
     pub workers: usize,
     /// Minimum gap between two requests to the same host.
@@ -74,6 +78,8 @@ pub struct Settings {
     pub warc: bool,
     pub zip: bool,
     pub replay: bool,
+    /// After downloading, check for missed files and fetch them again.
+    pub verify: bool,
     /// Re-check a finished copy instead of starting over.
     pub update: bool,
 }
@@ -84,6 +90,8 @@ impl Default for Settings {
             url: String::new(),
             output: default_output(),
             render_js: false,
+            profile: None,
+            platform: None,
             workers: 4,
             per_host_delay: Speed::default().delay(),
             respect_robots: true,
@@ -110,6 +118,7 @@ impl Default for Settings {
             warc: false,
             zip: false,
             replay: false,
+            verify: true,
             update: false,
         }
     }
@@ -145,6 +154,8 @@ impl Settings {
     ) -> Result<(CrawlOptions, SessionArgs), String> {
         let mut options = CrawlOptions {
             requester: if self.render_js { AUTO_ID } else { "wreq" }.to_owned(),
+            profile: self.profile.clone(),
+            platform: self.platform.clone(),
             concurrency: self.workers.clamp(1, MAX_WORKERS),
             delay_ms: self.per_host_delay.as_millis() as u64,
             ignore_robots: !self.respect_robots,
@@ -166,6 +177,7 @@ impl Settings {
             sitemaps: self.sitemaps,
             zip: self.zip,
             replay: self.replay && self.render_js,
+            verify: self.verify,
             ..CrawlOptions::default()
         };
         if let Some(mb) = number(&self.max_file_mb, "Skip files over (MB)")? {
@@ -192,6 +204,7 @@ impl Settings {
         }
         // Checked now, so a bad pattern is reported before anything starts.
         options.crawl_config(seed.clone(), output.to_path_buf())?;
+        options.check_impersonation()?;
 
         let mut session = SessionArgs::default();
         let user = self.auth_user.trim();
@@ -212,6 +225,43 @@ impl Settings {
         }
         Ok((options, session))
     }
+}
+
+/// The browser profiles to impersonate, grouped by browser in wreq-util's
+/// order: `[("chrome", ["chrome_100", …]), ("firefox", […]), …]`.
+pub fn profile_families() -> Vec<(String, Vec<String>)> {
+    let mut families: Vec<(String, Vec<String>)> = Vec::new();
+    for name in mc_requester_wreq::profiles() {
+        let family = name.split('_').next().unwrap_or_default().to_owned();
+        match families.iter_mut().find(|(f, _)| *f == family) {
+            Some((_, names)) => names.push(name),
+            None => families.push((family, vec![name])),
+        }
+    }
+    families
+}
+
+/// The profile copies use when none is chosen.
+pub fn default_profile() -> String {
+    mc_requester_wreq::default_profile()
+}
+
+/// `chrome_149` as `Chrome 149`, `safari_ios_18.1` as `Safari iOS 18.1`.
+pub fn pretty_profile(name: &str) -> String {
+    name.split('_')
+        .map(|part| match part {
+            "ios" => "iOS".to_owned(),
+            "okhttp" => "OkHttp".to_owned(),
+            _ => {
+                let mut chars = part.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().chain(chars).collect(),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `~/x` as a path under the home directory.
@@ -556,6 +606,8 @@ pub struct Progress {
     pub done: usize,
     pub total: usize,
     pub workers: Vec<Worker>,
+    /// The check for missed files is running.
+    pub checking: bool,
     pub started: Option<Instant>,
     pub ended: Option<Instant>,
     /// (when, bytes so far), for the download speed.
@@ -696,6 +748,25 @@ impl Progress {
                 self.done = *done;
                 self.total = *total;
             }
+            CrawlEvent::Verifying { files, retrying } => {
+                self.checking = true;
+                self.info(&format!(
+                    "Checking {files} saved files for missed downloads; fetching {retrying} again"
+                ));
+            }
+            CrawlEvent::Verified {
+                recovered,
+                still_missing,
+            } => {
+                self.checking = false;
+                let text =
+                    format!("Check done: {recovered} recovered, {still_missing} still missing");
+                if *still_missing > 0 {
+                    self.push(LineKind::Failed, &text, String::new());
+                } else {
+                    self.info(&text);
+                }
+            }
             CrawlEvent::SitemapRead { url, pages } => {
                 self.info(&format!("Sitemap {url}: {pages} pages listed"));
             }
@@ -741,14 +812,25 @@ impl Progress {
                 self.saved = summary.saved;
                 self.failed = summary.failed.len();
                 self.bytes = summary.bytes;
-                self.summary = Some(format!(
+                let mut text = format!(
                     "Copied {} files ({}) in {:.1}s; {} failed, {} skipped.",
                     summary.saved,
                     human_bytes(summary.bytes),
                     summary.elapsed.as_secs_f64(),
                     summary.failed.len(),
                     summary.skipped,
-                ));
+                );
+                if let Some(check) = &summary.verification {
+                    text.push_str(&match (check.retried, check.still_missing.len()) {
+                        (0, _) => " No missed files.".to_owned(),
+                        (_, 0) => format!(" Recovered all {} missed files.", check.recovered),
+                        (_, left) => format!(
+                            " Recovered {} missed files; {left} still missing.",
+                            check.recovered
+                        ),
+                    });
+                }
+                self.summary = Some(text);
                 self.report = Some(output.join(REPORT_HTML));
             }
             Err(message) => self.phase = Phase::Failed(message),
@@ -768,6 +850,7 @@ impl Progress {
     pub fn status(&self) -> String {
         match &self.phase {
             Phase::Idle => "Ready.".to_owned(),
+            Phase::Running if self.checking => "Checking for missed files…".to_owned(),
             Phase::Running => "Copying…".to_owned(),
             Phase::Stopping => "Stopping after the requests in flight…".to_owned(),
             Phase::Finished => self.summary.clone().unwrap_or_else(|| "Done.".to_owned()),
@@ -842,6 +925,25 @@ mod tests {
         };
         assert!(check_proxies(&bad).unwrap_err().starts_with("Proxy:"));
         drop(runtime);
+    }
+
+    #[test]
+    fn groups_and_names_profiles() {
+        let families = profile_families();
+        let chrome = &families.iter().find(|(f, _)| f == "chrome").unwrap().1;
+        assert!(chrome.contains(&default_profile()));
+        assert_eq!(pretty_profile("chrome_149"), "Chrome 149");
+        assert_eq!(pretty_profile("safari_ios_18.1"), "Safari iOS 18.1");
+        let form = Settings {
+            profile: Some("netscape_4".to_owned()),
+            ..settings("https://s.test/", "/out")
+        };
+        let seed = Url::parse("https://s.test/").unwrap();
+        assert!(
+            form.options(&seed, Path::new("/out"))
+                .unwrap_err()
+                .contains("unknown browser profile")
+        );
     }
 
     #[test]

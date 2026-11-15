@@ -446,3 +446,115 @@ async fn soft_404_pages_are_not_saved_or_followed() {
     );
     assert!(!out.path().join("site.test/assets").exists());
 }
+
+fn flaky_site() -> MockRequester {
+    MockRequester::new()
+        .route(
+            url("https://site.test/"),
+            MockRoute::html(
+                r#"<a href="flaky.html">a</a> <a href="gone.html">b</a> <img src="logo.png">"#,
+            ),
+        )
+        .route(
+            url("https://site.test/robots.txt"),
+            MockRoute::status(StatusCode::NOT_FOUND, ""),
+        )
+        // Drops the connection once, then answers.
+        .route_sequence(
+            url("https://site.test/flaky.html"),
+            vec![
+                MockRoute::Fail(MockFailure::Connect),
+                MockRoute::html("finally"),
+            ],
+        )
+        .route(
+            url("https://site.test/gone.html"),
+            MockRoute::status(StatusCode::NOT_FOUND, "no"),
+        )
+        .route(
+            url("https://site.test/logo.png"),
+            MockRoute::respond(StatusCode::OK, "image/png", "PNG"),
+        )
+}
+
+#[tokio::test]
+async fn verify_refetches_passing_failures_but_not_404s() {
+    let out = tempfile::tempdir().unwrap();
+    let requester = Arc::new(flaky_site());
+    let mut config = config(out.path());
+    config.max_retries = 0;
+    config.verify = true;
+    let crawler = Crawler::new(config, requester.clone());
+    let mut events = crawler.subscribe();
+    let summary = crawler.run().await.unwrap();
+
+    let check = summary.verification.unwrap();
+    assert_eq!((check.retried, check.recovered), (1, 1), "{check:?}");
+    assert!(check.still_missing.is_empty());
+    assert_eq!(
+        summary.failed.len(),
+        1,
+        "the 404 stays failed: {:?}",
+        summary.failed
+    );
+    assert!(out.path().join("site.test/flaky.html").is_file());
+    let gone_calls = requester
+        .calls()
+        .iter()
+        .filter(|u| u.path() == "/gone.html")
+        .count();
+    assert_eq!(gone_calls, 1, "a 404 isn't asked again");
+    let mut seen = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        match event {
+            CrawlEvent::Verifying { files, retrying } => {
+                seen.push(format!("verifying {files} {retrying}"))
+            }
+            CrawlEvent::Verified {
+                recovered,
+                still_missing,
+            } => seen.push(format!("verified {recovered} {still_missing}")),
+            _ => {}
+        }
+    }
+    assert_eq!(seen, ["verifying 2 1", "verified 1 0"]);
+
+    // Without the option the same failure stays.
+    let out = tempfile::tempdir().unwrap();
+    let mut plain = self::config(out.path());
+    plain.max_retries = 0;
+    let summary = Crawler::new(plain, Arc::new(flaky_site()))
+        .run()
+        .await
+        .unwrap();
+    assert!(summary.verification.is_none());
+    assert_eq!(summary.failed.len(), 2);
+}
+
+#[tokio::test]
+async fn verify_restores_files_deleted_since_the_last_run() {
+    let out = tempfile::tempdir().unwrap();
+    let store = MemoryStore::new();
+    let first = Crawler::new(config(out.path()), Arc::new(flaky_site())).with_store(store.clone());
+    first.run().await.unwrap();
+    let logo = out.path().join("site.test/logo.png");
+    std::fs::remove_file(&logo).unwrap();
+    // Running again resumes from the store: everything is already saved.
+    store_mark_stopped(&store);
+    let mut again = config(out.path());
+    again.verify = true;
+    let summary = Crawler::new(again, Arc::new(flaky_site()))
+        .with_store(store.clone())
+        .run()
+        .await
+        .unwrap();
+    let check = summary.verification.unwrap();
+    assert!(check.recovered >= 1, "{check:?}");
+    assert!(logo.is_file(), "the deleted file is back");
+    assert!(check.still_missing.is_empty(), "{check:?}");
+}
+
+fn store_mark_stopped(store: &MemoryStore) {
+    let mut store = store.clone();
+    mc_core::StateStore::set_status(&mut store, CrawlStatus::Stopped).unwrap();
+}

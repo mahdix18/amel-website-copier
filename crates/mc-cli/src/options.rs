@@ -153,6 +153,12 @@ pub struct CrawlOptions {
     /// `2M` (bytes per second; K and M are 1024 and 1024²).
     #[arg(long, value_name = "RATE", value_parser = parse_rate)]
     pub limit_rate: Option<u64>,
+
+    /// When the copy finishes, check every saved file is on disk and fetch
+    /// again what is missing or failed for a passing reason (timeouts,
+    /// dropped connections, 5xx).
+    #[arg(long)]
+    pub verify: bool,
 }
 
 /// Saved options from before proxy lists held one proxy or none.
@@ -225,6 +231,7 @@ impl CrawlOptions {
         config.replay = self.replay;
         config.use_sitemaps = self.sitemaps;
         config.max_rate = self.limit_rate;
+        config.verify = self.verify;
         Ok(config)
     }
 
@@ -235,6 +242,11 @@ impl CrawlOptions {
             max_body_bytes: self.max_file_mb.saturating_mul(MIB),
             ..SharedResources::default()
         })
+    }
+
+    /// Checks `--profile` and `--platform` name something wreq knows.
+    pub fn check_impersonation(&self) -> Result<(), String> {
+        mc_requester_wreq::check_impersonation(self.profile.as_deref(), self.platform.as_deref())
     }
 
     /// The proxies from `--proxy` and `--proxy-file`, checked.

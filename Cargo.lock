@@ -4791,6 +4791,7 @@ dependencies = [
  "mc-fixtures",
  "mc-requester",
  "mc-requester-playwright",
+ "mc-requester-wreq",
  "mc-store",
  "serde",
  "serde_json",

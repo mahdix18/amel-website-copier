@@ -35,6 +35,7 @@ pub fn commands(cx: &Context<'_>) -> Vec<(String, Command)> {
         }
     }
     list.push(("Show options".to_owned(), Command::Show(Tab::Copy)));
+    list.push(("Show browser".to_owned(), Command::Show(Tab::Browser)));
     list.push(("Show limits".to_owned(), Command::Show(Tab::Limits)));
     list.push(("Show rules".to_owned(), Command::Show(Tab::Rules)));
     list.push(("Show authentication".to_owned(), Command::Show(Tab::Auth)));

@@ -368,6 +368,18 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
     - In the real window, Test showed a live proxy at 200 and a dead one with a plain error. With the dead proxy listed first, the copy finished with 0 failures, against 6 before failover.
     - Not checked: HTTPS through a proxy (CONNECT), and Chromium's proxy, which is only unit-tested.
 
+- **Missed-files check and impersonation picker (2026-11-15):**
+  - Check for missed files (`--verify`; a checkbox in the app, on by default):
+    - When the crawl finishes, every saved file is checked on disk. URLs whose files are gone, or that failed for a passing reason (not a 4xx other than 408/429, not a soft 404, not a size limit), are queued and crawled again.
+    - `Verifying` and `Verified` events report it, and the summary carries a `Verification` (files checked, retried, recovered, still missing with reasons).
+  - Impersonation:
+    - `mistercopy requesters profiles` lists the about 150 wreq-util profiles by browser. `--profile` and `--platform` are checked before anything is written.
+    - The app has a Browser tab (browser, version stepper, platform, JavaScript switch), and the requester chip shows the profile in use and opens that tab. The choice is remembered.
+  - Checked:
+    - Engine tests: a dropped connection recovered while a 404 isn't asked again, and a deleted file restored on the next run.
+    - A UI test drives the Browser tab and checks the saved preferences.
+    - An echo server saw each profile's own User-Agent (Chrome, Firefox, Safari), and `--platform windows` switched Chrome's UA and `sec-ch-ua-platform`.
+
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.
 - **Playwright from Rust** still needs the Playwright driver plus Chromium (about 150 MB+ downloaded on demand). If that proves painful, `chromiumoxide` (pure-Rust CDP) is the drop-in alternative requester. The trait makes the swap cheap.

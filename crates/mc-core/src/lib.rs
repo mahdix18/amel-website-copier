@@ -20,7 +20,7 @@ mod warc;
 
 pub use crawler::{
     CrawlConfig, CrawlError, CrawlEvent, CrawlSummary, Crawler, Credential, REPORT_HTML,
-    REPORT_JSON, STATE_DIR, StopHandle, StopReason,
+    REPORT_JSON, STATE_DIR, StopHandle, StopReason, Verification,
 };
 pub use mc_extract::LinkKind;
 pub use normalize::normalize;

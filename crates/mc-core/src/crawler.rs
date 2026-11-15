@@ -83,6 +83,9 @@ pub struct CrawlConfig {
     pub use_sitemaps: bool,
     /// Average download speed cap, in bytes per second, across all workers.
     pub max_rate: Option<u64>,
+    /// When the crawl finishes, check that every saved file is on disk and
+    /// fetch again what is missing or failed for a passing reason.
+    pub verify: bool,
 }
 
 impl CrawlConfig {
@@ -112,6 +115,7 @@ impl CrawlConfig {
             replay: false,
             use_sitemaps: false,
             max_rate: None,
+            verify: false,
         }
     }
 }
@@ -222,6 +226,17 @@ pub enum CrawlEvent {
     WorkerIdle {
         worker: usize,
     },
+    /// The crawl is over and the check for missed files starts: this many
+    /// saved files are checked on disk, and this many URLs fetched again.
+    Verifying {
+        files: usize,
+        retrying: usize,
+    },
+    /// The check for missed files is done.
+    Verified {
+        recovered: usize,
+        still_missing: usize,
+    },
     /// A sitemap was read and listed this many pages.
     SitemapRead {
         url: Url,
@@ -247,6 +262,21 @@ pub struct CrawlSummary {
     /// Set when the crawl ended early and can be resumed.
     pub stopped: Option<StopReason>,
     pub report: Report,
+    /// What the check for missed files found, when it ran.
+    pub verification: Option<Verification>,
+}
+
+/// The result of checking a finished copy for missed files.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Verification {
+    /// Saved files checked on disk.
+    pub files: usize,
+    /// URLs fetched again: failed for a passing reason, or saved but gone.
+    pub retried: usize,
+    /// Of those, now saved.
+    pub recovered: usize,
+    /// Still not on disk, with the reason.
+    pub still_missing: Vec<(Url, String)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -346,6 +376,15 @@ impl Crawler {
             self.discover_sitemaps(&mut state, &policy, &seeds).await;
         }
         self.crawl(&mut state, &policy, started).await;
+        let verification = if self.config.verify
+            && !self.config.dry_run
+            && state.stopped.is_none()
+            && state.store_error.is_none()
+        {
+            Some(self.verify(&mut state, &policy, started).await)
+        } else {
+            None
+        };
         if let Some(error) = state.store_error.take() {
             return Err(error.into());
         }
@@ -368,11 +407,89 @@ impl Crawler {
         };
         state.set_status(status)?;
 
-        let summary = self.summarize(&state, &seeds, started.elapsed());
+        let mut summary = self.summarize(&state, &seeds, started.elapsed());
+        summary.verification = verification;
         if !self.config.dry_run && self.config.write_report {
             self.write_report(&summary.report).await?;
         }
         Ok(summary)
+    }
+
+    /// Checks every saved file is on disk, then fetches again the URLs
+    /// whose files are gone and those that failed for a reason that may
+    /// pass (a timeout, a dropped connection, a 5xx, a write error).
+    async fn verify(&self, state: &mut State, policy: &Policy, started: Instant) -> Verification {
+        let mut files = 0;
+        let mut missed = Vec::new();
+        for entry in state.entries.values() {
+            match &entry.state {
+                EntryState::Saved(saved) => {
+                    files += 1;
+                    if !self
+                        .config
+                        .output_dir
+                        .join(saved.path.to_path_buf())
+                        .is_file()
+                    {
+                        missed.push(entry.clone());
+                    }
+                }
+                EntryState::Failed(reason) if worth_retrying(reason) => missed.push(entry.clone()),
+                _ => {}
+            }
+        }
+        self.emit(CrawlEvent::Verifying {
+            files,
+            retrying: missed.len(),
+        });
+        if !missed.is_empty() {
+            for entry in &missed {
+                // A gone file must be fetched whole, not revalidated.
+                state.previous.remove(&entry.url);
+                let job = self.job_from(entry);
+                state.record(job.entry(EntryState::Queued));
+                state.queue.push_back(job);
+            }
+            self.crawl(state, policy, started).await;
+        }
+
+        let mut still_missing = Vec::new();
+        let mut recovered = 0;
+        for entry in &missed {
+            match state.entries.get(&entry.url).map(|e| &e.state) {
+                Some(EntryState::Saved(saved))
+                    if self
+                        .config
+                        .output_dir
+                        .join(saved.path.to_path_buf())
+                        .is_file() =>
+                {
+                    recovered += 1;
+                }
+                Some(EntryState::Alias(_) | EntryState::Remote(_)) => recovered += 1,
+                Some(EntryState::Failed(reason)) => {
+                    still_missing.push((entry.url.clone(), reason.clone()));
+                }
+                Some(EntryState::Queued) => {
+                    still_missing.push((
+                        entry.url.clone(),
+                        "not fetched: the copy stopped".to_owned(),
+                    ));
+                }
+                _ => still_missing.push((entry.url.clone(), "file not on disk".to_owned())),
+            }
+        }
+        still_missing.sort();
+        self.emit(CrawlEvent::Verified {
+            recovered,
+            still_missing: still_missing.len(),
+        });
+        Verification {
+            files,
+            retried: missed.len(),
+            recovered,
+            still_missing,
+        }
     }
 
     async fn validate(&self) -> Result<Vec<Url>, CrawlError> {
@@ -1568,6 +1685,21 @@ fn document_kind(mime: Option<&str>, headers: &HeaderMap) -> Option<Document> {
         Some("text/css") => Some(Document::Css),
         _ => None,
     }
+}
+
+/// Whether a failure may pass on a second try: not a 4xx answer (other than
+/// 408 and 429), a soft 404, a size limit or an unsupported redirect.
+fn worth_retrying(reason: &str) -> bool {
+    if let Some(code) = reason
+        .strip_prefix("HTTP ")
+        .and_then(|rest| rest.get(..3))
+        .and_then(|code| code.parse::<u16>().ok())
+    {
+        return !(400..500).contains(&code) || code == 408 || code == 429;
+    }
+    !(reason.starts_with("got a web page where")
+        || reason.starts_with("redirected to unsupported")
+        || reason.contains("larger than"))
 }
 
 fn extract(document: &Document, body: &[u8], url: &Url) -> Vec<Link> {

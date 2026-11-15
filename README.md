@@ -86,8 +86,10 @@ cargo run --release -p mc-gui -- https://example.com --output ~/copies --start
 
 The window is laid out like an API client, in a dark theme (a light one is a click away):
 
-- **Request bar**: the requester (HTTP with Chrome's TLS fingerprint, or AUTO with Chromium when built with `browser`), the site's address and **Copy**. Enter starts too. **Stop** saves progress; copying the same site into the same folder again continues where it stopped.
+- **Request bar**: the browser being impersonated (click it to change), the site's address and **Copy**. Enter starts too. **Stop** saves progress; copying the same site into the same folder again continues where it stopped.
 - **Options**: the folder, **Parallel downloads** (1–32 workers) and **Speed**: *Polite* (1 request per second per site), *Balanced* (4 per second) or *Fast* (no gap, all workers at once). There are also switches for robots.txt and JavaScript.
+- **Browser**: which browser to impersonate (Chrome, Edge, Opera, Firefox, Safari or OkHttp), its version (‹ › steps through about 150 profiles), and the platform it claims (Auto, Windows, macOS, Linux, Android, iOS). TLS fingerprint, HTTP/2 settings and headers all match the choice. With browser support, a switch also renders JavaScript-built pages in Chromium.
+- **Options** also has **Check for missed files after downloading** (on by default). When a copy finishes, it checks every saved file is on disk and downloads again anything missing or that failed for a passing reason (timeouts, dropped connections, 5xx answers). It doesn't retry 404s. The summary says how many were recovered and how many are still missing.
 - **Limits**: max depth, max pages, stop after a size or a time, skip files over a size, a bandwidth limit, other names of the same site, sitemaps (on by default here), and assets from other sites.
 - **Auth**: Basic auth, extra headers (one per line) and a cookies file. These are used for the run only and never saved. In builds with browser support, **Log in with browser** opens Chromium at the site. You log in there and press **Done**; the session's cookies are then saved in the copy's state folder (owner-only, left out of zips) and used for the copy.
 - **Proxy**: a list of proxies (one per line; http, https, socks4, socks5 or socks5h, credentials as `user:pass@`), *Round-robin* or *Sticky per site* rotation, hosts that go direct, and a switch for the system proxy. **Test** fetches the site through each proxy and shows the status and time, or why it failed. The status bar shows whether copies go direct or through proxies.
@@ -144,6 +146,8 @@ Useful `copy` and `scan` options:
 | `-j/--workers/--concurrency 4`, `--delay-ms 1000` | Parallel downloads, and the gap between two requests to one site |
 | `--retries 3`, `--timeout-secs 30` | Patience |
 | `--sitemaps` | Also copy the pages listed in the site's sitemaps |
+| `--verify` | When done, check for missed files and download them again |
+| `--profile NAME`, `--platform OS` | Browser to impersonate (`mistercopy requesters profiles` lists them) and the platform it claims |
 | `--proxy URL` (repeatable), `--proxy-file FILE` | Proxies to use; several rotate |
 | `--proxy-rotation round-robin\|sticky` | Each request the next proxy, or one proxy per site |
 | `--no-proxy HOSTS`, `--system-proxy` | Hosts that go direct (names, `.suffix`, IPs, CIDR); use `HTTPS_PROXY`/`NO_PROXY` |

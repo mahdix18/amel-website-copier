@@ -48,6 +48,50 @@ impl Default for WreqConfig {
     }
 }
 
+/// Every browser profile this build can impersonate, by name (`chrome_149`,
+/// `firefox_151`, `safari_26.4`, …), in wreq-util's order: oldest first
+/// within each browser.
+pub fn profiles() -> Vec<String> {
+    Profile::VARIANTS
+        .iter()
+        .filter_map(|profile| match serde_json::to_value(profile) {
+            Ok(serde_json::Value::String(name)) => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The profile used when none is named.
+pub fn default_profile() -> String {
+    match serde_json::to_value(DEFAULT_PROFILE) {
+        Ok(serde_json::Value::String(name)) => name,
+        _ => "chrome_149".to_owned(),
+    }
+}
+
+/// Platforms a profile can present.
+pub const PLATFORMS: [&str; 5] = ["windows", "macos", "linux", "android", "ios"];
+
+/// Checks a profile and platform name before a copy starts.
+pub fn check_impersonation(profile: Option<&str>, platform: Option<&str>) -> Result<(), String> {
+    if let Some(name) = profile
+        && !profiles().iter().any(|known| known == name)
+    {
+        return Err(format!(
+            "unknown browser profile `{name}`; `mistercopy requesters profiles` lists them"
+        ));
+    }
+    if let Some(name) = platform
+        && !PLATFORMS.contains(&name)
+    {
+        return Err(format!(
+            "unknown platform `{name}`; use one of {}",
+            PLATFORMS.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 const CAPABILITIES: Capabilities = Capabilities {
     executes_js: false,
     captures_subresources: false,
@@ -313,5 +357,27 @@ fn fetch_error(error: wreq::Error) -> FetchError {
         FetchError::Decode(error.to_string())
     } else {
         FetchError::Other(Box::new(error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lists_and_checks_profiles() {
+        let all = profiles();
+        assert!(all.len() > 20, "{all:?}");
+        for family in ["chrome_", "firefox_", "safari_", "edge_"] {
+            assert!(all.iter().any(|p| p.starts_with(family)), "{family}");
+        }
+        assert!(all.contains(&default_profile()));
+        assert!(check_impersonation(Some(&default_profile()), Some("linux")).is_ok());
+        assert!(
+            check_impersonation(Some("chrome_1"), None)
+                .unwrap_err()
+                .contains("unknown browser profile")
+        );
+        assert!(check_impersonation(None, Some("beos")).is_err());
     }
 }
