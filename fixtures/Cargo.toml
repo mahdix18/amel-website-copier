@@ -18,7 +18,7 @@ axum.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
 tower-http.workspace = true
 url.workspace = true
 

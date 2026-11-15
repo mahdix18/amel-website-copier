@@ -38,6 +38,7 @@ pub fn commands(cx: &Context<'_>) -> Vec<(String, Command)> {
     list.push(("Show limits".to_owned(), Command::Show(Tab::Limits)));
     list.push(("Show rules".to_owned(), Command::Show(Tab::Rules)));
     list.push(("Show authentication".to_owned(), Command::Show(Tab::Auth)));
+    list.push(("Show proxy".to_owned(), Command::Show(Tab::Proxy)));
     list.push(("Show output".to_owned(), Command::Show(Tab::Output)));
     list.push(("Show link map".to_owned(), Command::Show(Tab::LinkMap)));
     list.push(("Export link map as SVG".to_owned(), Command::ExportMap));

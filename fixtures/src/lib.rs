@@ -5,6 +5,8 @@
 //! need them.
 
 pub mod auth;
+mod proxy;
+pub use proxy::{PROXY_PASSWORD, PROXY_USER, ProxyServer};
 mod hostile;
 
 use std::fmt;

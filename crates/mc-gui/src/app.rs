@@ -16,6 +16,7 @@ use gpui_kit::{
     KeyDownEvent, Role, SharedString, TestSupportExt, Window, actions, div, px, relative,
 };
 use mc_core::{StopHandle, human_bytes};
+use mc_requester::ProxyRotation;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::oneshot;
 
@@ -55,8 +56,10 @@ pub enum Tab {
     /// Depth, size, time and bandwidth limits; sitemaps and aliases.
     Limits,
     Rules,
-    /// Credentials, headers, cookies, browser login and proxy.
+    /// Credentials, headers, cookies and browser login.
     Auth,
+    /// Proxy list, rotation, bypass and the system proxy.
+    Proxy,
     /// WARC, zip and offline replay.
     Output,
     LinkMap,
@@ -76,7 +79,8 @@ struct Fields {
     auth_password: Entity<InputState>,
     headers: Entity<TextareaState>,
     cookies: Entity<InputState>,
-    proxy: Entity<InputState>,
+    proxies: Entity<TextareaState>,
+    no_proxy: Entity<InputState>,
 }
 
 /// The tabs of the result panel.
@@ -105,6 +109,10 @@ pub struct CopyWindow {
     warc: bool,
     zip: bool,
     replay: bool,
+    proxy_rotation: ProxyRotation,
+    system_proxy: bool,
+    proxy_checking: bool,
+    proxy_checks: Option<Result<Vec<job::ProxyCheck>, String>>,
     /// Set while a browser login window is open; sending finishes it.
     login: Option<oneshot::Sender<()>>,
     login_note: String,
@@ -207,7 +215,16 @@ impl CopyWindow {
                     .placeholder("Authorization: Bearer …\nAccept-Language: en")
             }),
             cookies: input("path to a cookies.txt file", window, cx),
-            proxy: input("e.g. socks5://127.0.0.1:1080", window, cx),
+            proxies: cx.new(|cx| {
+                TextareaState::new(window, cx).auto_grow(3, 6).placeholder(
+                    "socks5h://127.0.0.1:1080\nhttp://user:pass@proxy.example.com:3128",
+                )
+            }),
+            no_proxy: input(
+                "e.g. localhost, .internal.example.com, 10.0.0.0/8",
+                window,
+                cx,
+            ),
         };
         Self {
             url,
@@ -226,6 +243,10 @@ impl CopyWindow {
             warc: false,
             zip: false,
             replay: false,
+            proxy_rotation: ProxyRotation::default(),
+            system_proxy: false,
+            proxy_checking: false,
+            proxy_checks: None,
             login: None,
             login_note: String::new(),
             projects,
@@ -418,7 +439,10 @@ impl CopyWindow {
             auth_password: text(&f.auth_password),
             headers: f.headers.read(cx).value().to_string(),
             cookies: text(&f.cookies),
-            proxy: text(&f.proxy),
+            proxies: f.proxies.read(cx).value().to_string(),
+            proxy_rotation: self.proxy_rotation,
+            no_proxy: text(&f.no_proxy),
+            system_proxy: self.system_proxy,
             warc: self.warc,
             zip: self.zip,
             replay: self.replay,
@@ -790,6 +814,14 @@ impl CopyWindow {
                 |this, cx| this.show(Tab::Auth, cx),
             ))
             .child(item(
+                "rail-proxy",
+                IconName::ExternalLink,
+                "Proxy",
+                self.tab == Tab::Proxy,
+                cx,
+                |this, cx| this.show(Tab::Proxy, cx),
+            ))
+            .child(item(
                 "rail-output",
                 IconName::HardDrive,
                 "Output",
@@ -971,10 +1003,24 @@ impl CopyWindow {
 
     fn status_bar(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
         let (color, phase) = phase_style(&self.progress, look);
+        let proxies = self
+            .fields
+            .proxies
+            .read(cx)
+            .value()
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+            .count();
+        let route = match (proxies, self.system_proxy) {
+            (0, false) => "direct".to_owned(),
+            (0, true) => "system proxy".to_owned(),
+            (1, _) => "via 1 proxy".to_owned(),
+            (n, _) => format!("via {n} proxies"),
+        };
         let mode = if self.render_js {
-            "Chromium + HTTP"
+            format!("Chromium + HTTP · {route}")
         } else {
-            "HTTP (Chrome TLS)"
+            format!("HTTP (Chrome TLS) · {route}")
         };
         div()
             .h(px(26.))
@@ -1133,7 +1179,15 @@ impl CopyWindow {
             &f.limit_rate,
             &f.aliases,
         ]);
-        let auth = filled(&[&f.auth_user, &f.cookies, &f.proxy])
+        let proxy = f
+            .proxies
+            .read(cx)
+            .value()
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+            .count()
+            + usize::from(self.system_proxy);
+        let auth = filled(&[&f.auth_user, &f.cookies])
             + usize::from(!f.headers.read(cx).value().trim().is_empty());
         let output = [self.warc, self.zip, self.replay && self.render_js]
             .iter()
@@ -1158,6 +1212,7 @@ impl CopyWindow {
             .child(tab("tab-limits", "Limits", Tab::Limits, limits))
             .child(tab("tab-rules", "Rules", Tab::Rules, rules))
             .child(tab("tab-auth", "Auth", Tab::Auth, auth))
+            .child(tab("tab-proxy", "Proxy", Tab::Proxy, proxy))
             .child(tab("tab-output", "Output", Tab::Output, output))
             .child(tab("tab-map", "Link map", Tab::LinkMap, 0))
             .into_any_element()
@@ -1459,12 +1514,207 @@ impl CopyWindow {
                         .child(self.login_note.clone()),
                 )
             })
+            .into_any_element()
+    }
+
+    fn check_proxies(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.proxy_checking {
+            return;
+        }
+        let receive = match job::check_proxies(&self.settings(false, cx)) {
+            Ok(receive) => receive,
+            Err(message) => {
+                self.proxy_checks = Some(Err(message));
+                return cx.notify();
+            }
+        };
+        self.proxy_checking = true;
+        self.proxy_checks = None;
+        cx.spawn_in(window, async move |this, cx| {
+            let checks = receive.await.unwrap_or_default();
+            let _ = this.update(cx, |this, cx| {
+                this.proxy_checking = false;
+                this.proxy_checks = Some(Ok(checks));
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn proxy_view(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let f = &self.fields;
+        let rotations = div()
+            .flex()
+            .p(px(2.))
+            .rounded_md()
+            .bg(look.raised)
+            .border_1()
+            .border_color(look.border)
+            .children(
+                [
+                    (
+                        ProxyRotation::RoundRobin,
+                        "Round-robin",
+                        "rotation-round-robin",
+                    ),
+                    (ProxyRotation::Sticky, "Sticky per site", "rotation-sticky"),
+                ]
+                .map(|(rotation, label, id)| {
+                    let active = self.proxy_rotation == rotation;
+                    div()
+                        .id(id)
+                        .test_support()
+                        .aria_label(label)
+                        .px_3()
+                        .py(px(3.))
+                        .rounded(px(4.))
+                        .text_sm()
+                        .cursor_pointer()
+                        .when(active, |el| el.bg(look.surface).text_color(look.text))
+                        .when(!active, |el| {
+                            el.text_color(look.muted)
+                                .hover(|el| el.text_color(look.text))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.proxy_rotation = rotation;
+                            cx.notify();
+                        }))
+                        .child(label)
+                }),
+            );
+        let results = match &self.proxy_checks {
+            _ if self.proxy_checking => div()
+                .text_xs()
+                .text_color(look.muted)
+                .child("Testing each proxy against the site…")
+                .into_any_element(),
+            None => div().into_any_element(),
+            Some(Err(message)) => div()
+                .text_xs()
+                .text_color(look.danger)
+                .child(message.clone())
+                .into_any_element(),
+            Some(Ok(checks)) => div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(checks.iter().enumerate().map(|(index, check)| {
+                    let (color, verdict) = match &check.result {
+                        Ok((status, took)) if (200..400).contains(status) => (
+                            look.success,
+                            format!("HTTP {status} in {} ms", took.as_millis()),
+                        ),
+                        Ok((407, _)) => (
+                            look.warning,
+                            "HTTP 407: the proxy wants credentials (http://user:pass@host:port)"
+                                .to_owned(),
+                        ),
+                        Ok((status, took)) => (
+                            look.warning,
+                            format!("HTTP {status} in {} ms", took.as_millis()),
+                        ),
+                        Err(error) => (look.danger, error.clone()),
+                    };
+                    div()
+                        .id(SharedString::from(format!("proxy-check-{index}")))
+                        .test_support()
+                        .aria_label(SharedString::from(format!("{}: {verdict}", check.proxy)))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_xs()
+                        .child(dot(color))
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .whitespace_nowrap()
+                                .child(check.proxy.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_color(color)
+                                .child(verdict),
+                        )
+                }))
+                .into_any_element(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
             .child(labelled(
-                "Proxy",
-                None,
-                Input::new(&f.proxy).id("proxy").aria_label("Proxy"),
+                "Proxies",
+                Some("one per line: http, https, socks4, socks5 or socks5h (DNS via the proxy); host:port means http"),
+                Textarea::new(&f.proxies).aria_label("Proxies"),
                 look,
             ))
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_end()
+                    .gap_4()
+                    .child(labelled(
+                        "Rotation",
+                        Some(match self.proxy_rotation {
+                            ProxyRotation::RoundRobin => "each request takes the next proxy",
+                            ProxyRotation::Sticky => "a site always goes through the same proxy",
+                        }),
+                        rotations,
+                        look,
+                    ))
+                    .child(
+                        div().flex_1().min_w(px(220.)).child(labelled(
+                            "Go direct for",
+                            None,
+                            Input::new(&f.no_proxy).id("no-proxy").aria_label("Bypass hosts"),
+                            look,
+                        )),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_3()
+                    .child(
+                        Switch::new("system-proxy")
+                            .checked(self.system_proxy)
+                            .label("Use the system proxy (HTTPS_PROXY, NO_PROXY) when none are listed")
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.system_proxy = *checked;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("test-proxies")
+                            .outline()
+                            .small()
+                            .icon(IconName::Play)
+                            .label("Test")
+                            .tooltip("Fetches the site through each proxy")
+                            .loading(self.proxy_checking)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.check_proxies(window, cx)
+                            })),
+                    ),
+            )
+            .child(results)
+            .when(job::browser_support(), |el| {
+                el.child(
+                    div()
+                        .text_xs()
+                        .text_color(look.muted)
+                        .child("Pages rendered in Chromium use the first proxy; rotation applies to the HTTP requester."),
+                )
+            })
             .into_any_element()
     }
 
@@ -2208,6 +2458,7 @@ impl Render for CopyWindow {
             Tab::Rules => self.rules_view(&look, cx),
             Tab::Limits => self.limits_view(&look, cx),
             Tab::Auth => self.auth_view(&look, cx),
+            Tab::Proxy => self.proxy_view(&look, cx),
             Tab::Output => self.output_view(&look, cx),
             Tab::LinkMap => self.map_view(&look, cx),
         };

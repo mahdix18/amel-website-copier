@@ -353,6 +353,21 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
     - The real window was driven over X: Limits, Auth and Output tabs, a 1K-capped copy, and the browser login opening and saving.
     - Not checked: typing real credentials into the opened Chromium. It opened as a Wayland window, which the X test driver can't type into.
 
+- **Proxy configuration (2026-11-15):**
+  - `ProxyConfig` and `ProxyPicker` in `mc-requester`:
+    - a list of servers (http, https, socks4, socks5, socks5h; credentials in the URL)
+    - round-robin or sticky-per-host rotation
+    - bypass rules (names with subdomains, `.suffix`, IPs, CIDR, `*`)
+    - optional system proxy from `HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`/`NO_PROXY`
+  - The HTTP requester picks a proxy for each hop. If a proxy can't be reached, it sits out for 30 s and the request moves on.
+  - Chromium previously ignored the proxy and went direct. It now launches with the first proxy, the bypass list and the credentials.
+  - CLI: `--proxy` (repeatable), `--proxy-file`, `--proxy-rotation`, `--no-proxy`, `--system-proxy`. Older saved copies with a single `proxy` string still load.
+  - App: a Proxy tab with a list, rotation, bypass, a system switch and **Test**, which tries each proxy against the site. The status bar shows the route.
+  - Checked:
+    - 140 tests pass, including copies through real local forward proxies: rotation over two, credentials, bypass, a 407 refusal, a bad scheme, and a dead proxy whose requests the live one takes over.
+    - In the real window, Test showed a live proxy at 200 and a dead one with a plain error. With the dead proxy listed first, the copy finished with 0 failures, against 6 before failover.
+    - Not checked: HTTPS through a proxy (CONNECT), and Chromium's proxy, which is only unit-tested.
+
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.
 - **Playwright from Rust** still needs the Playwright driver plus Chromium (about 150 MB+ downloaded on demand). If that proves painful, `chromiumoxide` (pure-Rust CDP) is the drop-in alternative requester. The trait makes the swap cheap.

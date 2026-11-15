@@ -5,6 +5,7 @@
 //! It is there for compatibility; the crawler's politeness limits apply to it
 //! like any other requester.
 
+use std::collections::HashMap;
 use std::pin::pin;
 use std::sync::Arc;
 
@@ -13,6 +14,7 @@ use mc_requester::{
     BuildError, Capabilities, CookieJar, FetchContext, FetchError, FetchRequest, FetchResponse,
     Redirect, Requester, RequesterFactory, SharedResources, Url, async_trait, header,
 };
+use mc_requester::{ProxyPicker, without_credentials};
 use serde::Deserialize;
 use wreq_util::{Emulation, Platform, Profile};
 
@@ -89,6 +91,8 @@ fn build_error(message: String) -> BuildError {
 
 pub struct WreqRequester {
     client: wreq::Client,
+    proxies: ProxyPicker,
+    wreq_proxies: HashMap<Url, wreq::Proxy>,
     config: WreqConfig,
     max_body_bytes: u64,
     cookies: Arc<CookieJar>,
@@ -103,19 +107,28 @@ impl WreqRequester {
                 .build(),
             None => Emulation::builder().profile(config.profile).build(),
         };
-        let mut builder = wreq::Client::builder()
+        let builder = wreq::Client::builder()
             .emulation(emulation)
             // Redirects are followed in `fetch` so every hop is recorded.
             .redirect(wreq::redirect::Policy::none())
             .timeout(shared.default_timeout);
-        if let Some(proxy) = &shared.proxy {
-            let proxy = wreq::Proxy::all(proxy.as_str())
-                .map_err(|e| build_error(format!("invalid proxy: {e}")))?;
-            builder = builder.proxy(proxy);
+        let proxies = ProxyPicker::new(&shared.proxy).map_err(build_error)?;
+        // Each server is parsed once; requests pick one of them.
+        let mut wreq_proxies = HashMap::new();
+        for server in proxies.servers() {
+            let proxy = wreq::Proxy::all(server.as_str()).map_err(|e| {
+                build_error(format!(
+                    "invalid proxy {}: {e}",
+                    without_credentials(server)
+                ))
+            })?;
+            wreq_proxies.insert(server.clone(), proxy);
         }
         let client = builder.build().map_err(|e| build_error(e.to_string()))?;
         Ok(Self {
             client,
+            proxies,
+            wreq_proxies,
             max_body_bytes: config.max_body_bytes.unwrap_or(shared.max_body_bytes),
             config,
             cookies: Arc::clone(&shared.cookies),
@@ -166,6 +179,7 @@ impl Requester for WreqRequester {
             if let Some(timeout) = request.timeout {
                 builder = builder.timeout(timeout);
             }
+
             if let Some(referrer) = &context.referrer
                 && !request.headers.contains_key(header::REFERER)
             {
@@ -183,7 +197,8 @@ impl Requester for WreqRequester {
                 }
             }
 
-            let response = builder.send().await.map_err(fetch_error)?;
+            // The proxy is picked per hop: a redirect to a bypassed host goes direct.
+            let response = self.send(builder, &url).await?;
             let status = response.status();
             self.cookies.store_from(&url, response.headers());
 
@@ -239,6 +254,52 @@ impl Requester for WreqRequester {
 
 fn body_from(bytes: Vec<u8>) -> mc_requester::Body {
     mc_requester::Body::Bytes(bytes.into())
+}
+
+impl WreqRequester {
+    /// Sends through the picked proxy. A proxy that can't be reached is
+    /// benched and the request moves to the next, so one dead proxy in a
+    /// list doesn't fail its share of the requests.
+    async fn send(
+        &self,
+        builder: wreq::RequestBuilder,
+        url: &Url,
+    ) -> Result<wreq::Response, FetchError> {
+        let mut tries = self.proxies.servers().len();
+        let mut next = Some(builder);
+        while let Some(current) = next.take() {
+            let Some(server) = self.proxies.pick(url).cloned() else {
+                return current.send().await.map_err(fetch_error);
+            };
+            tries = tries.saturating_sub(1);
+            if tries > 0 {
+                next = current.try_clone();
+            }
+            let attempt = match self.wreq_proxies.get(&server) {
+                Some(proxy) => current.proxy(proxy.clone()),
+                None => current,
+            };
+            match attempt.send().await {
+                Ok(response) => return Ok(response),
+                Err(error) if proxy_unreachable(&error) => {
+                    self.proxies.bench(&server);
+                    if next.is_none() {
+                        return Err(FetchError::Connect(format!(
+                            "proxy {} unreachable: {error}",
+                            without_credentials(&server)
+                        )));
+                    }
+                }
+                Err(error) => return Err(fetch_error(error)),
+            }
+        }
+        Err(FetchError::Other("no proxy could carry the request".into()))
+    }
+}
+
+/// The proxy itself, not the site, couldn't be reached.
+fn proxy_unreachable(error: &wreq::Error) -> bool {
+    error.is_connect() || format!("{error:?}").contains("ProxyConnect")
 }
 
 fn fetch_error(error: wreq::Error) -> FetchError {

@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use clap::Parser;
 use mc_core::{CrawlConfig, Credential, Rule, RuleAction};
-use mc_requester::{CookieJar, HeaderMap, SharedResources, Url};
+use mc_requester::{
+    CookieJar, HeaderMap, ProxyConfig, ProxyPicker, ProxyRotation, SharedResources, Url,
+    parse_proxy_list,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -86,9 +89,30 @@ pub struct CrawlOptions {
     #[arg(long)]
     pub external_assets: bool,
 
-    /// Proxy for all requests, e.g. `socks5://127.0.0.1:1080`.
+    /// Proxy for requests, e.g. `socks5h://127.0.0.1:1080` or
+    /// `http://user:pass@host:3128`. Repeat it to rotate over several.
+    #[arg(long, value_name = "URL")]
+    #[serde(deserialize_with = "one_or_many")]
+    pub proxy: Vec<Url>,
+
+    /// More proxies, one per line (`#` comments; `host:port` means http).
+    #[arg(long, value_name = "FILE")]
+    pub proxy_file: Option<PathBuf>,
+
+    /// How requests spread over several proxies: `round-robin` (each
+    /// request the next) or `sticky` (one proxy per host).
+    #[arg(long, value_name = "MODE", default_value = "round-robin")]
+    pub proxy_rotation: ProxyRotation,
+
+    /// Hosts that skip the proxy: names (subdomains included), `.suffix`,
+    /// IPs or CIDR ranges, comma-separated or repeated.
+    #[arg(long, value_name = "HOSTS", value_delimiter = ',')]
+    pub no_proxy: Vec<String>,
+
+    /// With no --proxy, use HTTPS_PROXY / HTTP_PROXY / ALL_PROXY and
+    /// NO_PROXY from the environment.
     #[arg(long)]
-    pub proxy: Option<Url>,
+    pub system_proxy: bool,
 
     /// Fetch what robots.txt disallows. Only for sites you are allowed to copy.
     #[arg(long)]
@@ -129,6 +153,21 @@ pub struct CrawlOptions {
     /// `2M` (bytes per second; K and M are 1024 and 1024²).
     #[arg(long, value_name = "RATE", value_parser = parse_rate)]
     pub limit_rate: Option<u64>,
+}
+
+/// Saved options from before proxy lists held one proxy or none.
+fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<Url>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMany {
+        One(Url),
+        Many(Vec<Url>),
+    }
+    Ok(match Option::<OneOrMany>::deserialize(deserializer)? {
+        None => Vec::new(),
+        Some(OneOrMany::One(url)) => vec![url],
+        Some(OneOrMany::Many(urls)) => urls,
+    })
 }
 
 /// `500K`, `2M`, `1.5m` or plain bytes, per second.
@@ -189,13 +228,33 @@ impl CrawlOptions {
         Ok(config)
     }
 
-    pub fn shared_resources(&self) -> SharedResources {
-        SharedResources {
+    pub fn shared_resources(&self) -> Result<SharedResources, String> {
+        Ok(SharedResources {
             default_timeout: Duration::from_secs(self.timeout_secs),
-            proxy: self.proxy.clone(),
+            proxy: self.proxy_config()?,
             max_body_bytes: self.max_file_mb.saturating_mul(MIB),
             ..SharedResources::default()
+        })
+    }
+
+    /// The proxies from `--proxy` and `--proxy-file`, checked.
+    pub fn proxy_config(&self) -> Result<ProxyConfig, String> {
+        let mut servers = self.proxy.clone();
+        if let Some(path) = &self.proxy_file {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read proxy file {}: {e}", path.display()))?;
+            servers
+                .extend(parse_proxy_list(&text).map_err(|e| format!("{}: {e}", path.display()))?);
         }
+        let config = ProxyConfig {
+            servers,
+            rotation: self.proxy_rotation,
+            bypass: self.no_proxy.clone(),
+            system: self.system_proxy,
+        };
+        // Builds it once now, so a bad proxy is reported before the crawl.
+        ProxyPicker::new(&config)?;
+        Ok(config)
     }
 
     /// The config block for requester `id`: only the options that requester
@@ -361,6 +420,39 @@ fn import_cookies(jar: &CookieJar, text: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_proxies_from_flags_files_and_old_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("proxies.txt");
+        std::fs::write(&list, "# pool\nb.test:8080\nsocks5h://c.test:1080\n").unwrap();
+        let options = CrawlOptions {
+            proxy: vec![Url::parse("http://u:p@a.test:3128").unwrap()],
+            proxy_file: Some(list),
+            proxy_rotation: ProxyRotation::Sticky,
+            no_proxy: vec!["localhost".to_owned()],
+            ..CrawlOptions::default()
+        };
+        let config = options.proxy_config().unwrap();
+        assert_eq!(config.servers.len(), 3);
+        assert_eq!(config.servers[1].as_str(), "http://b.test:8080/");
+        assert_eq!(config.rotation, ProxyRotation::Sticky);
+
+        let old: CrawlOptions =
+            serde_json::from_str(r#"{"proxy": "socks5://127.0.0.1:1080"}"#).unwrap();
+        assert_eq!(old.proxy.len(), 1);
+        let none: CrawlOptions = serde_json::from_str(r#"{"proxy": null}"#).unwrap();
+        assert!(none.proxy.is_empty());
+        let saved = serde_json::to_string(&options).unwrap();
+        let back: CrawlOptions = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back.proxy_rotation, ProxyRotation::Sticky);
+
+        let bad = CrawlOptions {
+            proxy: vec![Url::parse("ftp://x.test:21").unwrap()],
+            ..CrawlOptions::default()
+        };
+        assert!(bad.proxy_config().unwrap_err().contains("must start with"));
+    }
 
     #[test]
     fn parses_rates() {

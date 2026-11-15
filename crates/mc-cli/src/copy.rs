@@ -86,6 +86,14 @@ pub struct ScanArgs {
 
 pub async fn copy(args: CopyArgs, registry: &RequesterRegistry) -> ExitCode {
     let dir = &args.output;
+    // Bad options are reported before anything is written.
+    if let Err(message) = args
+        .options
+        .crawl_config(args.url.clone(), dir.clone())
+        .and_then(|_| args.options.proxy_config())
+    {
+        return usage_error(&message);
+    }
     if SqliteStore::exists_in(dir) {
         let mut store = match SqliteStore::open(dir) {
             Ok(store) => store,
@@ -298,7 +306,10 @@ impl Run {
             Err(message) => return (usage_error(&message), None),
         };
         config.dry_run = dry_run;
-        let shared = self.options.shared_resources();
+        let shared = match self.options.shared_resources() {
+            Ok(shared) => shared,
+            Err(message) => return (usage_error(&message), None),
+        };
         if let Err(message) = self.session.apply(&mut config, &shared) {
             return (usage_error(&message), None);
         }

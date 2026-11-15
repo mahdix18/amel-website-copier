@@ -13,10 +13,11 @@ use std::time::Duration;
 
 use mc_requester::{
     Body, BuildError, Capabilities, CapturedResponse, CookieJar, FetchContext, FetchError,
-    FetchRequest, FetchResponse, HeaderMap, Requester, RequesterFactory, SharedResources,
-    StatusCode, Url, async_trait, header,
+    FetchRequest, FetchResponse, HeaderMap, ProxyConfig, ProxyPicker, Requester, RequesterFactory,
+    SharedResources, StatusCode, Url, async_trait, header, without_credentials,
 };
 use playwright_rs::protocol::ResponseObject;
+use playwright_rs::protocol::proxy::ProxySettings;
 use playwright_rs::{
     Browser, BrowserContext, Cookie, GotoOptions, LaunchOptions, Page, Playwright, WaitUntil,
 };
@@ -204,6 +205,7 @@ pub struct PlaywrightRequester {
     timeout: Duration,
     max_body_bytes: u64,
     cookies: Arc<CookieJar>,
+    proxy: ProxyConfig,
     session: OnceCell<Session>,
     pages: Semaphore,
 }
@@ -216,6 +218,7 @@ impl PlaywrightRequester {
             timeout: shared.default_timeout,
             max_body_bytes: shared.max_body_bytes,
             cookies: Arc::clone(&shared.cookies),
+            proxy: shared.proxy.clone(),
             session: OnceCell::new(),
         }
     }
@@ -234,6 +237,9 @@ impl PlaywrightRequester {
                     .or_else(|| installed_chromium().into_iter().next());
                 if let Some(path) = executable {
                     options = options.executable_path(path.to_string_lossy().into_owned());
+                }
+                if let Some(proxy) = browser_proxy(&self.proxy)? {
+                    options = options.proxy(proxy);
                 }
                 let browser = playwright
                     .chromium()
@@ -666,6 +672,50 @@ pub fn netscape_cookies(cookies: &[Cookie]) -> String {
     text
 }
 
+/// Chromium takes one proxy per browser: the first server, with the bypass
+/// list and the credentials passed separately. Rotation applies to the HTTP
+/// requester only.
+fn browser_proxy(config: &ProxyConfig) -> Result<Option<ProxySettings>, FetchError> {
+    let picker = ProxyPicker::new(config).map_err(|e| FetchError::Other(e.into()))?;
+    let Some(server) = picker.servers().first() else {
+        return Ok(None);
+    };
+    let decode = percent_decode;
+    let mut settings =
+        ProxySettings::new(without_credentials(server).as_str().trim_end_matches('/'));
+    if !server.username().is_empty() {
+        settings = settings.username(decode(server.username()));
+        if let Some(password) = server.password() {
+            settings = settings.password(decode(password));
+        }
+    }
+    if !picker.bypass().is_empty() {
+        settings = settings.bypass(picker.bypass().join(","));
+    }
+    Ok(Some(settings))
+}
+
+/// Undoes the %XX escapes a URL's user info carries.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(byte) = text
+                .get(i + 1..i + 3)
+                .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn write_cookie_file(path: &Path, cookies: &[Cookie]) -> std::io::Result<()> {
     use std::io::Write as _;
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
@@ -760,6 +810,24 @@ fn navigation_error(error: playwright_rs::Error) -> FetchError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gives_chromium_the_first_proxy_with_separate_credentials() {
+        assert!(browser_proxy(&ProxyConfig::default()).unwrap().is_none());
+        let config = ProxyConfig {
+            servers: vec![
+                Url::parse("http://ann:p%40ss@a.test:3128").unwrap(),
+                Url::parse("socks5://b.test:1080").unwrap(),
+            ],
+            bypass: vec!["localhost".to_owned(), ".corp".to_owned()],
+            ..ProxyConfig::default()
+        };
+        let settings = browser_proxy(&config).unwrap().unwrap();
+        assert_eq!(settings.server, "http://a.test:3128");
+        assert_eq!(settings.username.as_deref(), Some("ann"));
+        assert_eq!(settings.password.as_deref(), Some("p@ss"));
+        assert_eq!(settings.bypass.as_deref(), Some("localhost,.corp"));
+    }
 
     fn step(json: serde_json::Value) -> LoginStep {
         serde_json::from_value(json).unwrap()

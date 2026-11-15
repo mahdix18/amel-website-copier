@@ -15,6 +15,7 @@ mod error;
 mod hybrid;
 #[cfg(feature = "mock")]
 pub mod mock;
+mod proxy;
 mod registry;
 mod requester;
 mod types;
@@ -22,6 +23,10 @@ mod types;
 pub use cookies::{CookieFileError, CookieJar};
 pub use error::FetchError;
 pub use hybrid::{AUTO_ID, HybridRequester, needs_browser};
+pub use proxy::{
+    PROXY_SCHEMES, ProxyConfig, ProxyPicker, ProxyRotation, check as check_proxy, parse_proxy_list,
+    without_credentials,
+};
 pub use registry::{RegistryError, RequesterInfo, RequesterRegistry};
 pub use requester::{BuildError, Capabilities, Requester, RequesterFactory, SharedResources};
 pub use types::{

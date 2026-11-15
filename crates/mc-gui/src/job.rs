@@ -11,7 +11,7 @@ use mc_cli::requesters::{build_requester, registry};
 use mc_core::{
     CrawlEvent, CrawlStatus, CrawlSummary, Crawler, REPORT_HTML, StopHandle, human_bytes,
 };
-use mc_requester::{AUTO_ID, Url};
+use mc_requester::{AUTO_ID, ProxyRotation, Url, parse_proxy_list, without_credentials};
 use mc_store::SqliteStore;
 use tokio::sync::{broadcast, oneshot};
 
@@ -64,7 +64,12 @@ pub struct Settings {
     /// `Name: value`, one per line.
     pub headers: String,
     pub cookies: String,
-    pub proxy: String,
+    /// Proxy URLs, one per line.
+    pub proxies: String,
+    pub proxy_rotation: ProxyRotation,
+    /// Hosts that skip the proxy, separated by commas or spaces.
+    pub no_proxy: String,
+    pub system_proxy: bool,
     // Extra output.
     pub warc: bool,
     pub zip: bool,
@@ -98,7 +103,10 @@ impl Default for Settings {
             auth_password: String::new(),
             headers: String::new(),
             cookies: String::new(),
-            proxy: String::new(),
+            proxies: String::new(),
+            proxy_rotation: ProxyRotation::default(),
+            no_proxy: String::new(),
+            system_proxy: false,
             warc: false,
             zip: false,
             replay: false,
@@ -168,12 +176,16 @@ impl Settings {
             options.limit_rate =
                 Some(parse_rate(rate).map_err(|e| format!("Bandwidth limit: {e}."))?);
         }
-        let proxy = self.proxy.trim();
-        if !proxy.is_empty() {
-            options.proxy = Some(Url::parse(proxy).map_err(|_| {
-                format!("“{proxy}” isn't a proxy address like socks5://host:1080.")
-            })?);
-        }
+        options.proxy = parse_proxy_list(&self.proxies).map_err(|e| format!("Proxy: {e}."))?;
+        options.proxy_rotation = self.proxy_rotation;
+        options.no_proxy = self
+            .no_proxy
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|host| !host.is_empty())
+            .map(str::to_owned)
+            .collect();
+        options.system_proxy = self.system_proxy;
+        options.proxy_config().map_err(|e| format!("Proxy: {e}."))?;
         if self.warc {
             let host = seed.host_str().unwrap_or("copy");
             options.warc = Some(output.join(format!("{host}.warc.gz")));
@@ -306,6 +318,88 @@ pub struct Running {
     pub workers: usize,
 }
 
+/// How one proxy answered a test request for the site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyCheck {
+    /// The proxy without its credentials.
+    pub proxy: String,
+    /// The HTTP status and how long it took, or why it failed.
+    pub result: Result<(u16, Duration), String>,
+}
+
+/// Fetches the site's address through each configured proxy at once (the
+/// system's, when that is on and none are listed), on a thread of its own.
+pub fn check_proxies(settings: &Settings) -> Result<oneshot::Receiver<Vec<ProxyCheck>>, String> {
+    let (seed, output) = parse(settings)?;
+    let (options, _) = settings.options(&seed, &output)?;
+    let config = options.proxy_config()?;
+    let servers = mc_requester::ProxyPicker::new(&config)?.servers().to_vec();
+    if servers.is_empty() {
+        return Err("Add a proxy, or turn on the system proxy, to test it.".to_owned());
+    }
+    let (send, receive) = oneshot::channel();
+    std::thread::Builder::new()
+        .name("mistercopy-proxy-check".to_owned())
+        .spawn(move || {
+            let checks = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map(|runtime| runtime.block_on(check_all(seed, servers)))
+                .unwrap_or_default();
+            let _ = send.send(checks);
+        })
+        .map_err(|e| format!("could not test the proxies: {e}"))?;
+    Ok(receive)
+}
+
+async fn check_all(seed: Url, servers: Vec<Url>) -> Vec<ProxyCheck> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, server) in servers.into_iter().enumerate() {
+        let seed = seed.clone();
+        tasks.spawn(async move {
+            let shared = mc_requester::SharedResources {
+                default_timeout: Duration::from_secs(15),
+                proxy: mc_requester::ProxyConfig {
+                    servers: vec![server.clone()],
+                    ..mc_requester::ProxyConfig::default()
+                },
+                ..mc_requester::SharedResources::default()
+            };
+            let started = std::time::Instant::now();
+            let result = match registry().build("wreq", &serde_json::json!({}), &shared) {
+                Ok(requester) => requester
+                    .fetch(
+                        mc_requester::FetchRequest::get(seed),
+                        &mc_requester::FetchContext::default(),
+                    )
+                    .await
+                    .map(|response| (response.status.as_u16(), started.elapsed()))
+                    .map_err(|e| explain_proxy_error(&e.to_string())),
+                Err(e) => Err(e.to_string()),
+            };
+            let proxy = without_credentials(&server).to_string();
+            (index, ProxyCheck { proxy, result })
+        });
+    }
+    let mut checks: Vec<_> = tasks.join_all().await;
+    checks.sort_by_key(|(index, _)| *index);
+    checks.into_iter().map(|(_, check)| check).collect()
+}
+
+/// A proxy failure in plain words, keeping the detail for odd cases.
+pub fn explain_proxy_error(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if lower.contains("proxyconnect") || lower.contains("connection refused") {
+        "Couldn't connect through this proxy: is it running, on this port, of this type?".to_owned()
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        "No answer within 15 seconds.".to_owned()
+    } else if lower.contains("dns") || lower.contains("resolve") {
+        "The proxy's host name doesn't resolve.".to_owned()
+    } else {
+        error.to_owned()
+    }
+}
+
 /// How a copy ended: the crawl's own result, and the zip if one was asked
 /// for and the copy finished.
 pub struct Outcome {
@@ -317,7 +411,7 @@ pub fn start(settings: &Settings) -> Result<Running, String> {
     let (seed, output) = parse(settings)?;
     let (options, session) = settings.options(&seed, &output)?;
     let mut config = options.crawl_config(seed.clone(), output.clone())?;
-    let shared = options.shared_resources();
+    let shared = options.shared_resources()?;
     session.apply(&mut config, &shared)?;
     let requester = build_requester(&registry(), &options, session.login_steps()?, &shared)
         .map_err(|e| {
@@ -711,6 +805,43 @@ mod tests {
             per_host_delay: Duration::ZERO,
             ..Settings::default()
         }
+    }
+
+    #[test]
+    fn tests_each_proxy_against_the_site() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (site, good, locked) = runtime.block_on(async {
+            (
+                mc_fixtures::FixtureServer::start(mc_fixtures::Site::StaticBlog)
+                    .await
+                    .unwrap(),
+                mc_fixtures::ProxyServer::start(false).await.unwrap(),
+                mc_fixtures::ProxyServer::start(true).await.unwrap(),
+            )
+        });
+        let form = Settings {
+            proxies: format!(
+                "{}\n# spare\n{}\nhttp://127.0.0.1:1\n",
+                good.url(false),
+                locked.url(false)
+            ),
+            ..settings(site.base_url().as_str(), "/tmp/unused")
+        };
+        let checks = check_proxies(&form).unwrap().blocking_recv().unwrap();
+        assert_eq!(checks.len(), 3);
+        assert!(matches!(checks[0].result, Ok((200, _))), "{:?}", checks[0]);
+        assert!(matches!(checks[1].result, Ok((407, _))), "{:?}", checks[1]);
+        assert!(checks[2].result.is_err(), "nothing listens on port 1");
+        assert!(!checks[0].proxy.contains('@'));
+
+        let empty = settings(site.base_url().as_str(), "/tmp/unused");
+        assert!(check_proxies(&empty).unwrap_err().contains("Add a proxy"));
+        let bad = Settings {
+            proxies: "ftp://x:21".to_owned(),
+            ..empty
+        };
+        assert!(check_proxies(&bad).unwrap_err().starts_with("Proxy:"));
+        drop(runtime);
     }
 
     #[test]
