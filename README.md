@@ -50,6 +50,12 @@ mistercopy scan https://example.com --report links.html   # audit only, saves no
 
 Press Ctrl-C once to stop after the requests in flight; progress is saved. Press it twice to quit at once.
 
+On a terminal a progress bar stays at the bottom: URLs done out of found so far, bytes, speed and how many workers are busy. Files download in parallel: `-j` sets the number of workers and `--delay-ms` the gap between two requests to the same site. The defaults (4 workers, 1 s gap) are polite. On a single site the gap, not the worker count, sets the pace. For a server you run or may load:
+
+```bash
+mistercopy copy https://example.com -o ./copies -j 16 --delay-ms 0
+```
+
 ### Archives and serving
 
 ```bash
@@ -71,14 +77,20 @@ For those apps, `--requester playwright --replay` keeps their scripts and embeds
 
 ```bash
 cargo run --release -p mc-gui
+cargo run --release -p mc-gui -- https://example.com --output ~/copies --start
 ```
 
-Enter a site's address and a folder, then click **Copy**. The window shows each file as it arrives, counts what was saved and what failed, and opens the report when the copy is done. **Stop** saves progress; copying the same site into the same folder again continues where it stopped.
+The window is laid out like an API client, in a dark theme (a light one is a click away):
+
+- **Request bar**: the requester (HTTP with Chrome's TLS fingerprint, or AUTO with Chromium when built with `browser`), the site's address and **Copy**. Enter starts too. **Stop** saves progress; copying the same site into the same folder again continues where it stopped.
+- **Options**: the folder, **Parallel downloads** (1–32 workers) and **Speed**: *Polite* (1 request per second per site), *Balanced* (4 per second) or *Fast* (no gap, all workers at once). There are also switches for robots.txt and JavaScript.
+- **Progress**: a progress bar (URLs done out of found so far), elapsed time, size and live speed, and counters for saved, unchanged, failed and retried files. **Workers** shows what each parallel worker is doing: downloading (GET), holding a URL until the site's turn comes (WAIT), or idle. **Activity** lists every file with its result, size or error, and can show errors only. When the copy ends, **Open report** opens the HTML report.
+- Workers, speed, switches and theme are remembered in `~/.config/mistercopy/prefs.json`.
 
 - **Copies** (left): every copy you've made, with its status, remembered in `~/.config/mistercopy/projects.json`. Select one to work on it again; finished copies get an **Update** button that only downloads what changed.
 - **Rules**: patterns of URLs to skip or to fetch from other sites, and a tester that says what the crawler would do with any URL before you copy.
 - **Link map**: the pages of a copy as a tree, each under the page that first linked to it, with failures and skips marked. **Export SVG** saves it as a diagram (`mistercopy-linkmap.svg`, next to the report).
-- **Command palette**: press **Ctrl+K** (or click **Commands**) and type to run anything: start, update, stop, switch tabs, export, open a saved copy.
+- **Command palette**: press **Ctrl+K** (or click **Search commands**) and type to run anything: start, update, stop, switch tabs, export, open a saved copy.
 
 Copies made in the app can also be resumed or updated with `mistercopy resume` and `mistercopy update`, which reuse the app's choices.
 
@@ -121,7 +133,8 @@ Useful `copy` and `scan` options:
 | `--exclude REGEX`, `--download-only REGEX`, `--include REGEX` | Rules, matched against the full URL |
 | `--alias HOST` | Treat another host as part of the same site |
 | `--external-assets` | Also fetch images, CSS and scripts from other hosts |
-| `--delay-ms 1000`, `--concurrency 4`, `--retries 3`, `--timeout-secs 30` | Politeness and patience |
+| `-j/--workers/--concurrency 4`, `--delay-ms 1000` | Parallel downloads, and the gap between two requests to one site |
+| `--retries 3`, `--timeout-secs 30` | Patience |
 | `--ignore-robots` | Fetch what robots.txt disallows; only for sites you may copy |
 
 These options are saved with the copy and reused by `resume` and `update`.

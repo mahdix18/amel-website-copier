@@ -5,7 +5,9 @@
 pub mod app;
 pub mod insight;
 pub mod job;
+pub mod look;
 pub mod palette;
+pub mod prefs;
 pub mod projects;
 
 pub use app::{CopyWindow, bind_keys};

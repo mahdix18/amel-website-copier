@@ -1,31 +1,76 @@
 use gpui_kit::{AppContext, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use mc_gui::CopyWindow;
 
+const USAGE: &str = "usage: mistercopy-gui [URL] [--output DIR] [--start]";
+
+/// What the command line asks the window to do.
+#[derive(Default)]
+struct Launch {
+    url: Option<String>,
+    output: Option<String>,
+    start: bool,
+}
+
+fn launch() -> Launch {
+    let mut launch = Launch::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--output" | "-o" => launch.output = args.next(),
+            "--start" => launch.start = true,
+            "--help" | "-h" => {
+                println!("{USAGE}");
+                std::process::exit(0);
+            }
+            "--version" | "-V" => {
+                println!("mistercopy-gui {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            _ if arg.starts_with('-') => {
+                eprintln!("unknown option {arg}\n{USAGE}");
+                std::process::exit(2);
+            }
+            _ => launch.url = Some(arg),
+        }
+    }
+    launch
+}
+
 fn main() {
     mc_gui::mark_start();
-    gpui_kit::application().run(|cx| {
-        gpui_kit::init(cx);
-        mc_gui::bind_keys(cx);
-        let bounds = Bounds::centered(None, size(px(880.), px(680.)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("MisterCopy".into()),
+    let launch = launch();
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            // The window switches to the saved theme if it differs.
+            mc_gui::look::Look::dark().apply(cx);
+            mc_gui::bind_keys(cx);
+            let bounds = Bounds::centered(None, size(px(1180.), px(780.)), cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("MisterCopy".into()),
+                    ..Default::default()
+                }),
+                window_min_size: Some(size(px(860.), px(600.))),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-        gpui_kit::open_window(options, cx, |window, cx| {
-            cx.new(|cx| CopyWindow::new(window, cx))
-        })
-        .expect("failed to open the MisterCopy window");
-        // Closing the last window quits the app, as on Linux and Windows.
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-        cx.activate(true);
-    });
+            };
+            gpui_kit::open_window(options, cx, move |window, cx| {
+                cx.new(|cx| {
+                    let mut view = CopyWindow::new(window, cx);
+                    view.prefill(launch.url, launch.output, launch.start, window, cx);
+                    view
+                })
+            })
+            .expect("failed to open the MisterCopy window");
+            // Closing the last window quits the app, as on Linux and Windows.
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
+            cx.activate(true);
+        });
 }

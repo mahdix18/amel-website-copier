@@ -329,6 +329,14 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - Homebrew, Scoop and winget manifests, which need published release URLs
   - choosing a license: the manifests declare MIT OR Apache-2.0, but the repo has no LICENSE files
 
+- **Design and parallelism pass (2026-11-15):**
+  - The crawler numbers its workers and reports them: `Waiting` (holding a URL until the host's slot), `Fetching` and `WorkerIdle`. It also sends `Progress {done, total, active}` from exact counters, so there's no scan per event. Fetches already ran in parallel on the multi-thread runtime; the 1 s per-host gap was what made a single-site copy look serial.
+  - The desktop app was redone in an API-client layout: header with command search, icon rail, filterable copies list, request bar (requester chip, address, Copy/Stop, Update), and Options/Rules/Link map tabs. Below is a result panel with a progress bar, time/size/speed, counters, and **Workers** and **Activity** tabs. It has dark and light themes.
+  - Options for workers (1–32), speed presets (Polite/Balanced/Fast) and robots.txt. These, and the theme, persist in `prefs.json`. `mistercopy-gui URL --output DIR --start` launches straight into a copy.
+  - Copy statuses in the sidebar are read when the list changes, no longer from SQLite on every frame.
+  - The CLI draws an indicatif progress bar on a terminal; `-j`/`--workers` alias `--concurrency`.
+  - Checked: 122 tests pass and clippy is clean. Screenshots of the running app show Polite mode with all four workers in WAIT, and then the finished copy. The CLI bar was checked in a pseudo-terminal.
+
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.
 - **Playwright from Rust** still needs the Playwright driver plus Chromium (about 150 MB+ downloaded on demand). If that proves painful, `chromiumoxide` (pure-Rust CDP) is the drop-in alternative requester. The trait makes the swap cheap.

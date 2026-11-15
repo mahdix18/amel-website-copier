@@ -4,7 +4,7 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mc_core::{
     CrawlConfig, CrawlEvent, CrawlStatus, CrawlSummary, Crawler, REPORT_HTML, StopHandle,
@@ -16,7 +16,11 @@ use mc_store::SqliteStore;
 use tokio::sync::{broadcast, oneshot};
 
 /// Log lines kept for display; older ones scroll away for good.
-const LOG_LINES: usize = 200;
+const LOG_LINES: usize = 500;
+/// Download speed is averaged over this window.
+const RATE_WINDOW: Duration = Duration::from_secs(3);
+/// Most parallel downloads the window offers.
+pub const MAX_WORKERS: usize = 32;
 
 /// Keys shared with the command-line tool, so `mistercopy resume` and
 /// `update` work on copies started here.
@@ -28,14 +32,57 @@ pub struct Settings {
     pub url: String,
     pub output: String,
     pub render_js: bool,
+    /// Parallel downloads.
+    pub workers: usize,
     /// Minimum gap between two requests to the same host.
     pub per_host_delay: Duration,
+    pub respect_robots: bool,
     /// Skip URLs matching this regex (empty: none).
     pub exclude: String,
     /// Fetch URLs matching this regex even outside the site (empty: none).
     pub include: String,
     /// Re-check a finished copy instead of starting over.
     pub update: bool,
+}
+
+/// How hard to press the site: the gap between two requests to one host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Speed {
+    /// One request a second per host: kind to small servers.
+    #[default]
+    Polite,
+    Balanced,
+    /// No gap: all workers download at once.
+    Fast,
+}
+
+impl Speed {
+    pub const ALL: [Self; 3] = [Self::Polite, Self::Balanced, Self::Fast];
+
+    pub fn delay(self) -> Duration {
+        match self {
+            Self::Polite => Duration::from_secs(1),
+            Self::Balanced => Duration::from_millis(250),
+            Self::Fast => Duration::ZERO,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Polite => "Polite",
+            Self::Balanced => "Balanced",
+            Self::Fast => "Fast",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::Polite => "1 request/s per site",
+            Self::Balanced => "4 requests/s per site",
+            Self::Fast => "no delay, all workers at once",
+        }
+    }
 }
 
 /// Whether this build can render JavaScript with Chromium.
@@ -89,6 +136,7 @@ pub struct Running {
     pub output: PathBuf,
     /// An unfinished copy of the same site was found and is being continued.
     pub resumed: bool,
+    pub workers: usize,
 }
 
 pub fn start(settings: &Settings) -> Result<Running, String> {
@@ -132,14 +180,20 @@ pub fn start(settings: &Settings) -> Result<Running, String> {
         "requester": if settings.render_js { "auto" } else { "wreq" },
         "exclude": list(&settings.exclude),
         "include": list(&settings.include),
+        "concurrency": settings.workers,
+        "delay_ms": settings.per_host_delay.as_millis() as u64,
+        "ignore_robots": !settings.respect_robots,
     });
     store
         .set_meta(META_OPTIONS, &options.to_string())
         .map_err(|e| e.to_string())?;
 
     let mut config = CrawlConfig::new(seed, &output);
+    config.concurrency = settings.workers.clamp(1, MAX_WORKERS);
     config.per_host_delay = settings.per_host_delay;
+    config.respect_robots = settings.respect_robots;
     config.rules = rules;
+    let workers = config.concurrency;
     let crawler = Crawler::new(config, requester).with_store(store);
     let stop = crawler.stop_handle();
     let events = crawler.subscribe();
@@ -162,6 +216,7 @@ pub fn start(settings: &Settings) -> Result<Running, String> {
         done,
         output,
         resumed,
+        workers,
     })
 }
 
@@ -195,6 +250,55 @@ pub enum Phase {
     Failed(String),
 }
 
+/// What one line of the activity log is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineKind {
+    Saved,
+    Unchanged,
+    Failed,
+    Retry,
+    Info,
+}
+
+impl LineKind {
+    /// The short tag shown in the log's first column.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Saved => "200",
+            Self::Unchanged => "304",
+            Self::Failed => "ERR",
+            Self::Retry => "RETRY",
+            Self::Info => "INFO",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogLine {
+    pub kind: LineKind,
+    pub text: String,
+    /// Size, delay or reason, shown right-aligned.
+    pub detail: String,
+}
+
+impl LogLine {
+    pub fn contains(&self, needle: &str) -> bool {
+        self.text.contains(needle) || self.detail.contains(needle)
+    }
+}
+
+/// What one download worker is doing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Worker {
+    /// The URL taken; `None` while idle.
+    pub url: Option<String>,
+    /// Holding the URL until the host's per-request delay has passed.
+    pub waiting: bool,
+    pub since: Option<Instant>,
+    /// Requests this worker has made.
+    pub requests: usize,
+}
+
 /// What the window shows about the current (or last) copy.
 #[derive(Debug, Clone, Default)]
 pub struct Progress {
@@ -204,20 +308,30 @@ pub struct Progress {
     pub failed: usize,
     pub retries: usize,
     pub bytes: u64,
+    /// URLs finished, and found so far (finished or not).
+    pub done: usize,
+    pub total: usize,
+    pub workers: Vec<Worker>,
+    pub started: Option<Instant>,
+    pub ended: Option<Instant>,
+    /// (when, bytes so far), for the download speed.
+    samples: VecDeque<(Instant, u64)>,
     /// Newest last.
-    pub log: VecDeque<String>,
+    pub log: VecDeque<LogLine>,
     pub summary: Option<String>,
     pub report: Option<PathBuf>,
 }
 
 impl Progress {
-    pub fn started(resumed: bool) -> Self {
+    pub fn started(resumed: bool, workers: usize) -> Self {
         let mut progress = Self {
             phase: Phase::Running,
+            workers: vec![Worker::default(); workers],
+            started: Some(Instant::now()),
             ..Self::default()
         };
         if resumed {
-            progress.push("Continuing the unfinished copy of this site.".to_owned());
+            progress.info("Continuing the unfinished copy of this site.");
         }
         progress
     }
@@ -233,42 +347,142 @@ impl Progress {
         matches!(self.phase, Phase::Running | Phase::Stopping)
     }
 
+    /// 0.0 to 1.0, or `None` before anything is known.
+    pub fn fraction(&self) -> Option<f32> {
+        match self.phase {
+            Phase::Finished => Some(1.0),
+            _ if self.total == 0 => None,
+            _ => Some((self.done as f32 / self.total as f32).clamp(0.0, 1.0)),
+        }
+    }
+
+    pub fn elapsed(&self) -> Duration {
+        match (self.started, self.ended) {
+            (Some(start), Some(end)) => end - start,
+            (Some(start), None) => start.elapsed(),
+            _ => Duration::ZERO,
+        }
+    }
+
+    /// Bytes per second over the last few seconds while running; the
+    /// average over the whole copy once it ended.
+    pub fn rate(&self) -> u64 {
+        if !self.running() {
+            let secs = self.elapsed().as_secs_f64();
+            return if secs > 0.0 {
+                (self.bytes as f64 / secs) as u64
+            } else {
+                0
+            };
+        }
+        let now = Instant::now();
+        let Some(&(at, bytes)) = self
+            .samples
+            .iter()
+            .find(|(at, _)| now.duration_since(*at) <= RATE_WINDOW)
+        else {
+            return 0;
+        };
+        let secs = now.duration_since(at).as_secs_f64().max(0.5);
+        (self.bytes.saturating_sub(bytes) as f64 / secs) as u64
+    }
+
+    /// Workers with a request on the wire.
+    pub fn active(&self) -> usize {
+        self.workers
+            .iter()
+            .filter(|w| w.url.is_some() && !w.waiting)
+            .count()
+    }
+
     pub fn apply(&mut self, event: &CrawlEvent) {
         match event {
             CrawlEvent::Saved { url, bytes, .. } => {
                 self.saved += 1;
                 self.bytes += bytes;
-                self.push(format!("saved   {url}  ({})", human_bytes(*bytes)));
+                self.sample();
+                self.push(LineKind::Saved, url.as_str(), human_bytes(*bytes));
             }
             CrawlEvent::Unchanged { url } => {
                 self.unchanged += 1;
-                self.push(format!("same    {url}"));
+                self.push(LineKind::Unchanged, url.as_str(), "unchanged".to_owned());
             }
             CrawlEvent::Failed { url, reason } => {
                 self.failed += 1;
-                self.push(format!("failed  {url}: {reason}"));
+                self.push(LineKind::Failed, url.as_str(), reason.clone());
             }
             CrawlEvent::Retrying {
                 url, delay, reason, ..
             } => {
                 self.retries += 1;
-                self.push(format!(
-                    "retry   {url} in {:.1}s ({reason})",
-                    delay.as_secs_f64()
-                ));
+                let detail = format!("in {:.1}s · {reason}", delay.as_secs_f64());
+                self.push(LineKind::Retry, url.as_str(), detail);
             }
             CrawlEvent::Stopping { reason } => {
                 self.phase = Phase::Stopping;
-                self.push(format!("stopping: {reason}"));
+                self.info(&format!("Stopping: {reason}"));
             }
             CrawlEvent::Rewriting { documents } => {
-                self.push(format!("rewriting links in {documents} pages"));
+                self.info(&format!("Rewriting links in {documents} pages"));
+            }
+            CrawlEvent::Waiting { worker, url } => {
+                if let Some(slot) = self.worker(*worker) {
+                    slot.url = Some(url.to_string());
+                    slot.waiting = true;
+                    slot.since = Some(Instant::now());
+                }
+            }
+            CrawlEvent::Fetching { worker, url } => {
+                if let Some(slot) = self.worker(*worker) {
+                    slot.url = Some(url.to_string());
+                    slot.waiting = false;
+                    slot.since = Some(Instant::now());
+                    slot.requests += 1;
+                }
+            }
+            CrawlEvent::WorkerIdle { worker } => {
+                if let Some(slot) = self.worker(*worker) {
+                    *slot = Worker {
+                        requests: slot.requests,
+                        ..Worker::default()
+                    };
+                }
+            }
+            CrawlEvent::Progress { done, total, .. } => {
+                self.done = *done;
+                self.total = *total;
             }
             CrawlEvent::Skipped { .. } => {}
         }
     }
 
+    fn worker(&mut self, index: usize) -> Option<&mut Worker> {
+        if index >= self.workers.len() && index < MAX_WORKERS {
+            self.workers.resize(index + 1, Worker::default());
+        }
+        self.workers.get_mut(index)
+    }
+
+    fn sample(&mut self) {
+        let now = Instant::now();
+        while self
+            .samples
+            .front()
+            .is_some_and(|(at, _)| now.duration_since(*at) > RATE_WINDOW)
+        {
+            self.samples.pop_front();
+        }
+        self.samples.push_back((now, self.bytes));
+    }
+
     pub fn finish(&mut self, result: Result<CrawlSummary, String>, output: &Path) {
+        self.ended = Some(Instant::now());
+        for worker in &mut self.workers {
+            *worker = Worker {
+                requests: worker.requests,
+                ..Worker::default()
+            };
+        }
         match result {
             Ok(summary) => {
                 self.phase = if summary.stopped.is_some() {
@@ -307,11 +521,19 @@ impl Progress {
         }
     }
 
-    fn push(&mut self, line: String) {
+    fn info(&mut self, text: &str) {
+        self.push(LineKind::Info, text, String::new());
+    }
+
+    fn push(&mut self, kind: LineKind, text: &str, detail: String) {
         if self.log.len() == LOG_LINES {
             self.log.pop_front();
         }
-        self.log.push_back(line);
+        self.log.push_back(LogLine {
+            kind,
+            text: text.to_owned(),
+            detail,
+        });
     }
 }
 
@@ -324,7 +546,9 @@ mod tests {
             url: url.to_owned(),
             output: output.to_owned(),
             render_js: false,
+            workers: 4,
             per_host_delay: Duration::ZERO,
+            respect_robots: true,
             exclude: String::new(),
             include: String::new(),
             update: false,
@@ -359,8 +583,23 @@ mod tests {
     #[test]
     fn tracks_events() {
         let url = Url::parse("https://s.test/").unwrap();
-        let mut progress = Progress::started(true);
+        let mut progress = Progress::started(true, 2);
         assert!(progress.running());
+        assert_eq!(progress.fraction(), None);
+        progress.apply(&CrawlEvent::Fetching {
+            worker: 1,
+            url: url.clone(),
+        });
+        assert_eq!(progress.active(), 1);
+        assert_eq!(progress.workers[1].url.as_deref(), Some("https://s.test/"));
+        progress.apply(&CrawlEvent::WorkerIdle { worker: 1 });
+        assert_eq!(progress.active(), 0);
+        progress.apply(&CrawlEvent::Progress {
+            done: 1,
+            total: 4,
+            active: 0,
+        });
+        assert_eq!(progress.fraction(), Some(0.25));
         progress.apply(&CrawlEvent::Saved {
             url: url.clone(),
             path: PathBuf::from("x"),
@@ -389,12 +628,12 @@ mod tests {
 
     #[test]
     fn reports_how_it_ended() {
-        let mut progress = Progress::started(false);
+        let mut progress = Progress::started(false, 4);
         progress.finish(Err("disk full".to_owned()), Path::new("/out"));
         assert_eq!(progress.status(), "disk full");
         assert!(!progress.running());
 
-        let mut progress = Progress::started(false);
+        let mut progress = Progress::started(false, 4);
         let summary = CrawlSummary {
             saved: 3,
             bytes: 1024,

@@ -23,6 +23,7 @@ fn open(
     let projects = Projects::load(Some(projects.join("projects.json")));
     cx.update(|cx| {
         gpui_kit::init(cx);
+        mc_gui::look::Look::dark().apply(cx);
         mc_gui::bind_keys(cx);
         let bounds = Bounds {
             origin: Point::default(),
@@ -71,7 +72,7 @@ fn copies_a_site_from_the_window(cx: &mut TestAppContext) {
     cx.update_window(handle.into(), |_, window, cx| {
         let output = out.path().to_string_lossy().into_owned();
         view.update(cx, |view, cx| {
-            view.per_host_delay = Duration::ZERO;
+            view.speed = mc_gui::job::Speed::Fast;
             view.output_input()
                 .clone()
                 .update(cx, |input, cx| input.set_value(output, window, cx));

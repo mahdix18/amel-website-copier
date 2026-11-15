@@ -34,7 +34,7 @@ pub fn commands(cx: &Context<'_>) -> Vec<(String, Command)> {
             list.push(("Update this copy".to_owned(), Command::Update));
         }
     }
-    list.push(("Show copy".to_owned(), Command::Show(Tab::Copy)));
+    list.push(("Show options".to_owned(), Command::Show(Tab::Copy)));
     list.push(("Show rules".to_owned(), Command::Show(Tab::Rules)));
     list.push(("Show link map".to_owned(), Command::Show(Tab::LinkMap)));
     list.push(("Export link map as SVG".to_owned(), Command::ExportMap));

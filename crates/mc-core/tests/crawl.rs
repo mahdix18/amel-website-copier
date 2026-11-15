@@ -227,3 +227,43 @@ async fn rejects_bad_input_before_crawling() {
         "{err}"
     );
 }
+
+#[tokio::test]
+async fn reports_workers_and_progress() {
+    let out = tempfile::tempdir().unwrap();
+    let mut config = config(out.path());
+    config.concurrency = 3;
+    let crawler = Crawler::new(config, Arc::new(site()));
+    let mut events = crawler.subscribe();
+    let summary = crawler.run().await.unwrap();
+
+    let (mut fetching, mut idle, mut last) = (0, 0, None);
+    let mut previous_done = 0;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            CrawlEvent::Fetching { worker, .. } => {
+                assert!(worker < 3, "worker {worker} beyond the concurrency");
+                fetching += 1;
+            }
+            CrawlEvent::WorkerIdle { worker } => {
+                assert!(worker < 3);
+                idle += 1;
+            }
+            CrawlEvent::Progress {
+                done,
+                total,
+                active,
+            } => {
+                assert!(done >= previous_done, "progress went backwards");
+                assert!(done <= total && active <= 3);
+                previous_done = done;
+                last = Some((done, total, active));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(fetching, idle, "every request ends with its worker idle");
+    assert!(fetching >= summary.saved);
+    let (done, total, active) = last.unwrap();
+    assert_eq!((done, active), (total, 0), "finished with nothing left");
+}

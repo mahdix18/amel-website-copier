@@ -195,6 +195,28 @@ pub enum CrawlEvent {
     Rewriting {
         documents: usize,
     },
+    /// Worker `worker` (numbered from 0 up to the concurrency) took `url`
+    /// but waits for the host's turn (the per-host delay) before sending.
+    Waiting {
+        worker: usize,
+        url: Url,
+    },
+    /// Worker `worker` sent a request for `url`.
+    Fetching {
+        worker: usize,
+        url: Url,
+    },
+    /// Worker `worker` finished its request and waits for the next one.
+    WorkerIdle {
+        worker: usize,
+    },
+    /// Counts for a progress bar, sent whenever they change. `done` URLs
+    /// are finished one way or another; `total` grows as links are found.
+    Progress {
+        done: usize,
+        total: usize,
+        active: usize,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -370,6 +392,7 @@ impl Crawler {
                     }
                     _ => {}
                 }
+                state.count(None, &entry.state);
                 state.entries.insert(entry.url.clone(), entry);
             }
         }
@@ -406,6 +429,9 @@ impl Crawler {
     async fn crawl(&self, state: &mut State, policy: &Policy, started: Instant) {
         let mut tasks: JoinSet<Task> = JoinSet::new();
         let mut in_flight: HashMap<task::Id, InFlight> = HashMap::new();
+        // Free worker numbers, lowest first.
+        let mut workers: Vec<usize> = (0..self.config.concurrency).rev().collect();
+        let mut last_progress = None;
         loop {
             state.release_due_retries();
             if state.stopped.is_none()
@@ -416,7 +442,16 @@ impl Crawler {
             }
             let halted = state.stopped.is_some() || state.store_error.is_some();
             if !halted {
-                self.dispatch(state, policy, &mut tasks, &mut in_flight);
+                self.dispatch(state, policy, &mut tasks, &mut in_flight, &mut workers);
+            }
+            let progress = (state.done, state.done + state.queued, tasks.len());
+            if last_progress != Some(progress) {
+                last_progress = Some(progress);
+                self.emit(CrawlEvent::Progress {
+                    done: progress.0,
+                    total: progress.1,
+                    active: progress.2,
+                });
             }
             let idle = tasks.is_empty();
             if idle && (halted || (state.queue.is_empty() && state.delayed.is_empty())) {
@@ -427,13 +462,19 @@ impl Crawler {
             tokio::select! {
                 joined = tasks.join_next_with_id(), if !idle => match joined {
                     Some(Ok((id, task))) => {
-                        in_flight.remove(&id);
+                        if let Some(flight) = in_flight.remove(&id) {
+                            self.release(&mut workers, flight.worker());
+                        }
                         self.complete(state, policy, task).await;
                     }
                     Some(Err(error)) => match in_flight.remove(&error.id()) {
                         // A requester panicked; the crawl carries on without it.
-                        Some(InFlight::Page(job)) => self.fail(state, &job, format!("requester crashed: {error}")),
-                        Some(InFlight::Robots(key)) => {
+                        Some(InFlight::Page(job, worker)) => {
+                            self.release(&mut workers, worker);
+                            self.fail(state, &job, format!("requester crashed: {error}"));
+                        }
+                        Some(InFlight::Robots(key, worker)) => {
+                            self.release(&mut workers, worker);
                             let result = Err(FetchError::Other(error.to_string().into()));
                             self.robots_fetched(state, key, &result);
                         }
@@ -445,6 +486,22 @@ impl Crawler {
                 () = self.stop.inner.notify.notified() => {}
             }
         }
+    }
+
+    /// Tells listeners a worker is waiting for its slot, if it is.
+    fn announce(&self, worker: usize, url: &Url, slot: Deadline) {
+        if slot > Deadline::now() {
+            self.emit(CrawlEvent::Waiting {
+                worker,
+                url: url.clone(),
+            });
+        }
+    }
+
+    fn release(&self, workers: &mut Vec<usize>, worker: usize) {
+        workers.push(worker);
+        workers.sort_unstable_by(|a, b| b.cmp(a));
+        self.emit(CrawlEvent::WorkerIdle { worker });
     }
 
     fn stop_reason(&self, state: &State, started: Instant) -> Option<StopReason> {
@@ -473,6 +530,7 @@ impl Crawler {
         policy: &Policy,
         tasks: &mut JoinSet<Task>,
         in_flight: &mut HashMap<task::Id, InFlight>,
+        workers: &mut Vec<usize>,
     ) {
         while tasks.len() < self.config.concurrency {
             let Some(job) = state.queue.pop_front() else {
@@ -520,14 +578,19 @@ impl Crawler {
                         let slot = state.reserve_slot(&robots_url, self.config.per_host_delay);
                         let requester = Arc::clone(&self.requester);
                         let task_key = key.clone();
+                        let worker = workers.pop().unwrap_or_default();
+                        self.announce(worker, &robots_url, slot);
+                        let events = self.events.clone();
                         let handle = tasks.spawn(async move {
                             tokio::time::sleep_until(slot).await;
+                            let url = robots_url.clone();
+                            let _ = events.send(CrawlEvent::Fetching { worker, url });
                             let result = requester
                                 .fetch(FetchRequest::get(robots_url), &FetchContext::default())
                                 .await;
                             Task::Robots(task_key, result)
                         });
-                        in_flight.insert(handle.id(), InFlight::Robots(key));
+                        in_flight.insert(handle.id(), InFlight::Robots(key, worker));
                         continue;
                     }
                 }
@@ -543,12 +606,17 @@ impl Crawler {
                 attempt: job.attempt,
             };
             let tracked = job.clone();
+            let worker = workers.pop().unwrap_or_default();
+            self.announce(worker, &job.url, slot);
+            let events = self.events.clone();
             let handle = tasks.spawn(async move {
                 tokio::time::sleep_until(slot).await;
+                let url = job.url.clone();
+                let _ = events.send(CrawlEvent::Fetching { worker, url });
                 let result = requester.fetch(request, &context).await;
                 Task::Fetch(job, result)
             });
-            in_flight.insert(handle.id(), InFlight::Page(tracked));
+            in_flight.insert(handle.id(), InFlight::Page(tracked, worker));
         }
     }
 
@@ -1188,8 +1256,16 @@ enum Task {
 }
 
 enum InFlight {
-    Page(Job),
-    Robots(String),
+    Page(Job, usize),
+    Robots(String, usize),
+}
+
+impl InFlight {
+    fn worker(&self) -> usize {
+        match self {
+            Self::Page(_, worker) | Self::Robots(_, worker) => *worker,
+        }
+    }
 }
 
 enum RobotsSlot {
@@ -1220,6 +1296,10 @@ struct State {
     store: Option<Box<dyn StateStore>>,
     store_error: Option<StoreError>,
     fetched: usize,
+    /// Entries waiting for (or in) a request.
+    queued: usize,
+    /// Entries that left the queue, or were finished without it.
+    done: usize,
     bytes: u64,
     unchanged: usize,
     stopped: Option<StopReason>,
@@ -1239,7 +1319,31 @@ impl State {
         {
             self.store_error = Some(error);
         }
+        let was_queued = self
+            .entries
+            .get(&entry.url)
+            .map(|old| old.state == EntryState::Queued);
+        self.count(was_queued, &entry.state);
         self.entries.insert(entry.url.clone(), entry);
+    }
+
+    /// Keeps `queued` and `done` in step with an entry moving from its old
+    /// state (`None`: new) to `state`.
+    fn count(&mut self, was_queued: Option<bool>, state: &EntryState) {
+        let queued = *state == EntryState::Queued;
+        match (was_queued, queued) {
+            (Some(true), true) | (Some(false), false) => {}
+            (Some(true), false) => {
+                self.queued -= 1;
+                self.done += 1;
+            }
+            (_, true) => self.queued += 1,
+            (None, false) => {
+                if !matches!(state, EntryState::Skipped(_)) {
+                    self.done += 1;
+                }
+            }
+        }
     }
 
     fn set_status(&mut self, status: CrawlStatus) -> Result<(), StoreError> {

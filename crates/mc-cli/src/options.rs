@@ -30,8 +30,8 @@ pub struct CrawlOptions {
     #[arg(long)]
     pub platform: Option<String>,
 
-    /// Requests in flight at once.
-    #[arg(long, default_value_t = 4)]
+    /// Parallel downloads: requests in flight at once.
+    #[arg(long, short = 'j', visible_alias = "workers", default_value_t = 4)]
     pub concurrency: usize,
 
     /// Minimum milliseconds between two requests to the same host.

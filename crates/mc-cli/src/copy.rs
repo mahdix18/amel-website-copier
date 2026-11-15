@@ -1,8 +1,11 @@
 //! `copy`, `resume`, `update` and `scan`: one crawl runner, four ways in.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use mc_core::{
     CrawlEvent, CrawlStatus, CrawlSummary, Crawler, REPORT_HTML, REPORT_JSON, StopHandle,
     human_bytes,
@@ -388,32 +391,104 @@ async fn handle_interrupts(stop: StopHandle) {
     }
 }
 
+/// Prints each result as a line. On a terminal a progress bar stays at the
+/// bottom: files done out of found, bytes, speed and busy workers.
 async fn print_events(mut events: broadcast::Receiver<CrawlEvent>) {
+    let bar = std::io::stderr().is_terminal().then(progress_bar);
+    let started = Instant::now();
+    let mut bytes = 0u64;
+    let say = |line: String, error: bool| {
+        let print = || {
+            if error {
+                eprintln!("{line}");
+            } else {
+                println!("{line}");
+            }
+        };
+        match &bar {
+            Some(bar) => bar.suspend(print),
+            None => print(),
+        }
+    };
     loop {
         match events.recv().await {
-            Ok(CrawlEvent::Saved { url, bytes, .. }) => {
-                println!("saved   {url} ({})", human_bytes(bytes))
+            Ok(CrawlEvent::Saved {
+                url, bytes: size, ..
+            }) => {
+                bytes += size;
+                say(format!("saved   {url} ({})", human_bytes(size)), false);
             }
-            Ok(CrawlEvent::Unchanged { url }) => println!("same    {url}"),
-            Ok(CrawlEvent::Failed { url, reason }) => eprintln!("failed  {url}: {reason}"),
+            Ok(CrawlEvent::Unchanged { url }) => say(format!("same    {url}"), false),
+            Ok(CrawlEvent::Failed { url, reason }) => say(format!("failed  {url}: {reason}"), true),
             Ok(CrawlEvent::Retrying {
                 url,
                 attempt,
                 delay,
                 reason,
-            }) => eprintln!(
-                "retry   {url} in {:.1}s ({reason}, attempt {attempt})",
-                delay.as_secs_f64()
+            }) => say(
+                format!(
+                    "retry   {url} in {:.1}s ({reason}, attempt {attempt})",
+                    delay.as_secs_f64()
+                ),
+                true,
             ),
-            Ok(CrawlEvent::Stopping { reason }) => eprintln!("stopping: {reason}"),
+            Ok(CrawlEvent::Stopping { reason }) => say(format!("stopping: {reason}"), true),
             Ok(CrawlEvent::Rewriting { documents }) => {
-                println!("rewriting links in {documents} documents")
+                if let Some(bar) = &bar {
+                    bar.set_message(format!("rewriting links in {documents} documents"));
+                } else {
+                    println!("rewriting links in {documents} documents");
+                }
             }
-            Ok(CrawlEvent::Skipped { .. }) => {}
-            Err(RecvError::Lagged(missed)) => eprintln!("({missed} progress messages dropped)"),
+            Ok(CrawlEvent::Progress {
+                done,
+                total,
+                active,
+            }) => {
+                if let Some(bar) = &bar {
+                    bar.set_length(total as u64);
+                    bar.set_position(done as u64);
+                    bar.set_message(transfer_line(bytes, started.elapsed(), active));
+                }
+            }
+            Ok(
+                CrawlEvent::Skipped { .. }
+                | CrawlEvent::Waiting { .. }
+                | CrawlEvent::Fetching { .. }
+                | CrawlEvent::WorkerIdle { .. },
+            ) => {}
+            Err(RecvError::Lagged(missed)) => {
+                say(format!("({missed} progress messages dropped)"), true)
+            }
             Err(RecvError::Closed) => break,
         }
     }
+    if let Some(bar) = bar {
+        bar.finish_and_clear();
+    }
+}
+
+fn progress_bar() -> ProgressBar {
+    let bar = ProgressBar::with_draw_target(Some(0), ProgressDrawTarget::stderr_with_hz(8));
+    bar.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.yellow} {elapsed_precise} [{wide_bar:.yellow/blue}] {pos}/{len} {msg}",
+        )
+        .expect("valid template")
+        .progress_chars("━╸─"),
+    );
+    bar.enable_steady_tick(Duration::from_millis(120));
+    bar
+}
+
+/// `3.2 MiB · 410 KiB/s · 4 active`
+fn transfer_line(bytes: u64, elapsed: Duration, active: usize) -> String {
+    let secs = elapsed.as_secs_f64().max(0.001);
+    format!(
+        "· {} · {}/s · {active} active",
+        human_bytes(bytes),
+        human_bytes((bytes as f64 / secs) as u64)
+    )
 }
 
 fn print_summary(summary: &CrawlSummary, dry_run: bool) {
