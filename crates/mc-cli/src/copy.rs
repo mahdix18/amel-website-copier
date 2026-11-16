@@ -412,6 +412,8 @@ async fn print_events(mut events: broadcast::Receiver<CrawlEvent>) {
                 true,
             ),
             Ok(CrawlEvent::Stopping { reason }) => say(format!("stopping: {reason}"), true),
+            Ok(CrawlEvent::Paused) => say("paused".to_owned(), true),
+            Ok(CrawlEvent::Resumed) => say("resumed".to_owned(), true),
             Ok(CrawlEvent::Verifying { files, retrying }) => say(
                 format!("checking {files} saved files; fetching {retrying} missed URLs again"),
                 false,

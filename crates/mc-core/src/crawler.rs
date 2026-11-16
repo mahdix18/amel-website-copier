@@ -155,7 +155,8 @@ impl fmt::Display for StopReason {
     }
 }
 
-/// Asks a running crawl to stop after the requests in flight.
+/// Controls a running crawl from outside: stop it after the requests in
+/// flight, or pause and resume it.
 #[derive(Debug, Clone, Default)]
 pub struct StopHandle {
     inner: Arc<StopSignal>,
@@ -164,6 +165,7 @@ pub struct StopHandle {
 #[derive(Debug, Default)]
 struct StopSignal {
     requested: AtomicBool,
+    paused: AtomicBool,
     notify: Notify,
 }
 
@@ -171,6 +173,30 @@ impl StopHandle {
     pub fn stop(&self) {
         self.inner.requested.store(true, Ordering::SeqCst);
         self.inner.notify.notify_one();
+    }
+
+    /// No new requests start; those in flight finish, and the crawl waits
+    /// until [`Self::resume`] (or [`Self::stop`]).
+    pub fn pause(&self) {
+        self.inner.paused.store(true, Ordering::SeqCst);
+        self.inner.notify.notify_one();
+    }
+
+    pub fn resume(&self) {
+        self.inner.paused.store(false, Ordering::SeqCst);
+        self.inner.notify.notify_one();
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.inner.paused.load(Ordering::SeqCst)
+    }
+
+    /// Waits while paused (and not stopped). Workers poll: the crawl loop
+    /// owns the notification.
+    async fn hold_while_paused(&self) {
+        while self.is_paused() && !self.requested() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     fn requested(&self) -> bool {
@@ -207,6 +233,9 @@ pub enum CrawlEvent {
     Stopping {
         reason: StopReason,
     },
+    /// Paused: no new requests start until resumed.
+    Paused,
+    Resumed,
     /// Fetching is over; links in this many documents are being rewritten.
     Rewriting {
         documents: usize,
@@ -642,6 +671,7 @@ impl Crawler {
         policy: &Policy,
         url: &Url,
     ) -> Result<FetchResponse, FetchError> {
+        self.wait_while_paused().await;
         let slot = state.reserve_slot(url, self.config.per_host_delay);
         tokio::time::sleep_until(slot).await;
         let job = Job {
@@ -657,6 +687,19 @@ impl Crawler {
         self.requester
             .fetch(request, &FetchContext::default())
             .await
+    }
+
+    /// Outside the crawl loop (reading sitemaps), a pause holds here until
+    /// resumed or stopped.
+    async fn wait_while_paused(&self) {
+        if !self.stop.is_paused() || self.stop.requested() {
+            return;
+        }
+        self.emit(CrawlEvent::Paused);
+        while self.stop.is_paused() && !self.stop.requested() {
+            self.stop.inner.notify.notified().await;
+        }
+        self.emit(CrawlEvent::Resumed);
     }
 
     fn job_from(&self, entry: &UrlEntry) -> Job {
@@ -677,6 +720,7 @@ impl Crawler {
         // Free worker numbers, lowest first.
         let mut workers: Vec<usize> = (0..self.config.concurrency).rev().collect();
         let mut last_progress = None;
+        let mut was_paused = false;
         loop {
             state.release_due_retries();
             if state.stopped.is_none()
@@ -686,7 +730,18 @@ impl Crawler {
                 self.emit(CrawlEvent::Stopping { reason });
             }
             let halted = state.stopped.is_some() || state.store_error.is_some();
-            if !halted {
+            let paused = self.stop.is_paused() && !halted;
+            if paused != was_paused {
+                was_paused = paused;
+                self.emit(if paused {
+                    CrawlEvent::Paused
+                } else {
+                    CrawlEvent::Resumed
+                });
+            }
+            // While paused nothing new starts, and with the queue still full
+            // the loop below waits for resume or stop instead of ending.
+            if !halted && !paused {
                 self.dispatch(state, policy, &mut tasks, &mut in_flight, &mut workers);
             }
             let progress = (state.done, state.done + state.queued, tasks.len());
@@ -855,8 +910,11 @@ impl Crawler {
             self.announce(worker, &job.url, slot);
             let events = self.events.clone();
             let limit = self.limit.clone();
+            let control = self.stop.clone();
             let handle = tasks.spawn(async move {
                 tokio::time::sleep_until(slot).await;
+                // A worker waiting its turn holds while paused too.
+                control.hold_while_paused().await;
                 let url = job.url.clone();
                 let _ = events.send(CrawlEvent::Fetching { worker, url });
                 let result = requester.fetch(request, &context).await;

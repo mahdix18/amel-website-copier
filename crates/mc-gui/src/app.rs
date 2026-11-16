@@ -10,11 +10,12 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::switch::Switch;
-use gpui_kit::component::{Disableable, Icon, IconName, Selectable, Sizable};
+use gpui_kit::component::{Disableable, Icon, IconName, Selectable, Sizable, TitleBar};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla, KeyBinding,
-    KeyDownEvent, Role, SharedString, TestSupportExt, Window, actions, div, px, relative,
+    AnyElement, AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
+    KeyBinding, KeyDownEvent, Role, SharedString, TestSupportExt, Window, actions, div, px,
+    relative,
 };
 use mc_core::{StopHandle, human_bytes};
 use mc_requester::ProxyRotation;
@@ -24,6 +25,7 @@ use tokio::sync::oneshot;
 use crate::insight::{self, MapLine};
 use crate::job::{self, LineKind, MAX_WORKERS, Progress, Settings, Speed};
 use crate::look::Look;
+use crate::mini::MiniWindow;
 use crate::palette::{self, Command};
 use crate::prefs::Prefs;
 use crate::projects::{Project, ProjectStatus, Projects};
@@ -144,6 +146,12 @@ pub struct CopyWindow {
     /// Set once the startup probe (MISTERCOPY_PROBE) has been armed.
     probed: bool,
     prefs_path: Option<PathBuf>,
+    /// The mini window, while it is open.
+    mini: Option<AnyWindowHandle>,
+    mini_opening: bool,
+    /// Minimize the main window when the mini window opens. Off in tests,
+    /// whose headless windows can't minimize.
+    pub minimize_for_mini: bool,
 }
 
 impl CopyWindow {
@@ -278,6 +286,9 @@ impl CopyWindow {
             palette_query,
             probed: false,
             prefs_path,
+            mini: None,
+            mini_opening: false,
+            minimize_for_mini: true,
         }
     }
 
@@ -367,6 +378,8 @@ impl CopyWindow {
             Command::Start => self.start(false, cx),
             Command::Update => self.start(true, cx),
             Command::Stop => self.stop(cx),
+            Command::Pause => self.toggle_pause(cx),
+            Command::Mini => self.show_mini(window, cx),
             Command::Show(tab) => self.show(tab, cx),
             Command::ExportMap => {
                 self.tab = Tab::LinkMap;
@@ -626,6 +639,70 @@ impl CopyWindow {
         cx.notify();
     }
 
+    /// Pauses a running copy, or resumes a paused one.
+    pub fn toggle_pause(&mut self, cx: &mut Context<Self>) {
+        let Some(control) = &self.stop else {
+            return;
+        };
+        match self.progress.phase {
+            job::Phase::Running => {
+                control.pause();
+                self.progress.phase = job::Phase::Paused;
+            }
+            job::Phase::Paused => {
+                control.resume();
+                self.progress.phase = job::Phase::Running;
+            }
+            _ => return,
+        }
+        cx.notify();
+    }
+
+    /// Shrinks to the mini window: the main window is minimized and a
+    /// small strip with the progress stays on top.
+    pub fn show_mini(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mini.is_some() || self.mini_opening {
+            return;
+        }
+        self.mini_opening = true;
+        let me = cx.entity();
+        let main_window = window.window_handle();
+        // Opened once this update is over: the mini window's first frame
+        // reads this window's progress.
+        cx.defer(move |cx| {
+            let opened = MiniWindow::open(&me, main_window, cx);
+            me.update(cx, |this, cx| {
+                this.mini_opening = false;
+                match opened {
+                    Ok(handle) => this.mini = Some(handle),
+                    Err(message) => this.progress.failed_note(message),
+                }
+                cx.notify();
+            });
+            if me.read(cx).mini.is_some() && me.read(cx).minimize_for_mini {
+                let _ = main_window.update(cx, |_, window, _| window.minimize_window());
+            }
+        });
+    }
+
+    /// The mini window closed itself.
+    pub fn mini_closed(&mut self) {
+        self.mini = None;
+    }
+
+    pub fn mini_open(&self) -> bool {
+        self.mini.is_some()
+    }
+
+    /// The site being copied, for the mini window.
+    pub fn site_name(&self, cx: &App) -> String {
+        let text = self.url.read(cx).value().to_string();
+        mc_requester::Url::parse(text.trim())
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_owned))
+            .unwrap_or(text)
+    }
+
     fn stop(&mut self, cx: &mut Context<Self>) {
         if let Some(stop) = &self.stop {
             stop.stop();
@@ -722,16 +799,16 @@ impl CopyWindow {
         } else {
             IconName::Moon
         };
-        div()
-            .h(px(44.))
-            .flex_none()
-            .px_3()
+        // The header is the window's title bar: it drags the window and, where
+        // the app draws its own decorations (GNOME on Wayland), carries the
+        // minimize, maximize and close buttons.
+        let content = div()
+            .flex_1()
+            .h_full()
+            .pr_3()
             .flex()
             .items_center()
             .justify_between()
-            .bg(look.chrome)
-            .border_b_1()
-            .border_color(look.border)
             .child(
                 div()
                     .flex()
@@ -770,7 +847,12 @@ impl CopyWindow {
                     .icon(theme_icon)
                     .tooltip("Switch light / dark")
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_look(cx))),
-            )
+            );
+        TitleBar::new()
+            .h(px(44.))
+            .bg(look.chrome)
+            .border_color(look.border)
+            .child(content)
             .into_any_element()
     }
 
@@ -1140,6 +1222,18 @@ impl CopyWindow {
             )
             // Opens the browser settings, like a method picker.
             .on_click(cx.listener(|this, _, _, cx| this.show(Tab::Browser, cx)));
+        let paused = self.progress.phase == job::Phase::Paused;
+        let pause = (running && self.progress.phase != job::Phase::Stopping).then(|| {
+            Button::new("pause")
+                .outline()
+                .icon(if paused {
+                    IconName::Play
+                } else {
+                    IconName::Pause
+                })
+                .label(if paused { "Resume" } else { "Pause" })
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_pause(cx)))
+        });
         let action = if running {
             Button::new("stop")
                 .danger()
@@ -1178,7 +1272,15 @@ impl CopyWindow {
                         ),
                     ),
             )
+            .children(pause)
             .child(div().h(px(36.)).flex().items_center().child(action))
+            .child(
+                Button::new("mini")
+                    .ghost()
+                    .icon(IconName::Minimize)
+                    .tooltip("Shrink to a mini window that shows the progress")
+                    .on_click(cx.listener(|this, _, window, cx| this.show_mini(window, cx))),
+            )
             .when(!running && self.can_update(), |el| {
                 el.child(
                     Button::new("update")
@@ -2629,11 +2731,20 @@ impl Render for CopyWindow {
         if !self.probed && std::env::var_os("MISTERCOPY_PROBE").is_some() {
             // Measures startup: report once the first frame is on screen, then quit.
             self.probed = true;
-            window.on_next_frame(|_, cx| {
+            window.on_next_frame(|window, cx| {
+                // Which decorations the desktop granted decides whether the
+                // title bar draws its own minimize/maximize/close buttons.
+                let decorations = match window.window_decorations() {
+                    gpui_kit::Decorations::Client { .. } => "client",
+                    gpui_kit::Decorations::Server => "server",
+                };
+                let controls = window.window_controls();
                 println!(
-                    "startup_ms={} rss_kb={}",
+                    "startup_ms={} rss_kb={} decorations={decorations} minimize={} maximize={}",
                     crate::startup_ms(),
-                    crate::rss_kb().unwrap_or(0)
+                    crate::rss_kb().unwrap_or(0),
+                    controls.minimize,
+                    controls.maximize,
                 );
                 cx.quit();
             });
@@ -2728,6 +2839,7 @@ fn phase_style(progress: &Progress, look: &Look) -> (Hsla, &'static str) {
         job::Phase::Idle => (look.muted, "Ready"),
         job::Phase::Running => (look.accent, "Copying"),
         job::Phase::Stopping => (look.warning, "Stopping"),
+        job::Phase::Paused => (look.warning, "Paused"),
         job::Phase::Finished if progress.failed > 0 => (look.warning, "Done with errors"),
         job::Phase::Finished => (look.success, "Done"),
         job::Phase::Stopped => (look.warning, "Stopped"),

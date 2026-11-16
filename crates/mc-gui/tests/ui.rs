@@ -345,3 +345,86 @@ fn picks_a_browser_to_impersonate(cx: &mut TestAppContext) {
     assert!(prefs.contains("\"platform\": \"windows\""), "{prefs}");
     assert!(prefs.contains("firefox_"), "{prefs}");
 }
+
+#[gpui_kit::test]
+fn pauses_resumes_and_shrinks_to_a_mini_window(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime
+        .block_on(FixtureServer::start(Site::StaticBlog))
+        .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let (handle, view) = open(cx, config.path());
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        let output = out.path().to_string_lossy().into_owned();
+        view.update(cx, |view, cx| {
+            // Polite: one request a second, so the copy is still running.
+            view.speed = mc_gui::job::Speed::Polite;
+            view.minimize_for_mini = false;
+            view.output_input()
+                .clone()
+                .update(cx, |input, cx| input.set_value(output, window, cx));
+        });
+        window.render_frame(cx);
+        window.click("url", cx);
+        window.input(server.base_url().as_str(), cx);
+        window.click("copy", cx);
+        window.render_frame(cx);
+        window.click("pause", cx);
+        assert!(
+            window
+                .find("status")
+                .label()
+                .unwrap_or_default()
+                .starts_with("Paused"),
+        );
+    })
+    .unwrap();
+    assert_eq!(
+        cx.update(|cx| view.read(cx).progress().phase.clone()),
+        Phase::Paused
+    );
+
+    // The mini window opens and shows the same copy.
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("mini", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    assert!(cx.update(|cx| view.read(cx).mini_open()));
+    assert_eq!(cx.update(|cx| cx.windows().len()), 2);
+
+    // The crawl confirms the pause.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !cx.update(|cx| {
+        view.read(cx)
+            .progress()
+            .log
+            .iter()
+            .any(|line| line.contains("Paused"))
+    }) {
+        assert!(Instant::now() < deadline, "the crawl never paused");
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // Resume, from the main window's view, and let the copy finish.
+    cx.update(|cx| view.update(cx, |view, cx| view.toggle_pause(cx)));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while cx.update(|cx| view.read(cx).progress().running()) {
+        assert!(Instant::now() < deadline, "the copy didn't finish");
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let progress = cx.update(|cx| view.read(cx).progress().clone());
+    assert_eq!(progress.phase, Phase::Finished, "{}", progress.status());
+    assert!(
+        progress.log.iter().any(|line| line.contains("Paused")),
+        "{:#?}",
+        progress.log.iter().map(|l| &l.text).collect::<Vec<_>>()
+    );
+    assert!(progress.log.iter().any(|line| line.contains("Resumed")));
+}

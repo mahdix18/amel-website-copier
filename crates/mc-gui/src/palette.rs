@@ -9,6 +9,10 @@ pub enum Command {
     Start,
     Update,
     Stop,
+    /// Pause, or resume when paused.
+    Pause,
+    /// Shrink to the mini window.
+    Mini,
     Show(Tab),
     ExportMap,
     OpenReport,
@@ -28,12 +32,14 @@ pub fn commands(cx: &Context<'_>) -> Vec<(String, Command)> {
     let mut list = vec![("New copy".to_owned(), Command::NewCopy)];
     if cx.running {
         list.push(("Stop copying".to_owned(), Command::Stop));
+        list.push(("Pause or resume copying".to_owned(), Command::Pause));
     } else {
         list.push(("Copy now".to_owned(), Command::Start));
         if cx.can_update {
             list.push(("Update this copy".to_owned(), Command::Update));
         }
     }
+    list.push(("Mini window".to_owned(), Command::Mini));
     list.push(("Show options".to_owned(), Command::Show(Tab::Copy)));
     list.push(("Show browser".to_owned(), Command::Show(Tab::Browser)));
     list.push(("Show limits".to_owned(), Command::Show(Tab::Limits)));

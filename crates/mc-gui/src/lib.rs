@@ -6,6 +6,7 @@ pub mod app;
 pub mod insight;
 pub mod job;
 pub mod look;
+pub mod mini;
 pub mod palette;
 pub mod prefs;
 pub mod projects;

@@ -543,6 +543,8 @@ pub enum Phase {
     #[default]
     Idle,
     Running,
+    /// No new requests start until resumed.
+    Paused,
     Stopping,
     Finished,
     /// Stopped early; copying the same site again continues it.
@@ -638,6 +640,11 @@ impl Progress {
         progress
     }
 
+    /// Notes a problem in the log without changing the phase.
+    pub fn failed_note(&mut self, message: String) {
+        self.push(LineKind::Failed, &message, String::new());
+    }
+
     pub fn failed(message: String) -> Self {
         Self {
             phase: Phase::Failed(message),
@@ -646,7 +653,7 @@ impl Progress {
     }
 
     pub fn running(&self) -> bool {
-        matches!(self.phase, Phase::Running | Phase::Stopping)
+        matches!(self.phase, Phase::Running | Phase::Paused | Phase::Stopping)
     }
 
     /// 0.0 to 1.0, or `None` before anything is known.
@@ -723,6 +730,18 @@ impl Progress {
             CrawlEvent::Stopping { reason } => {
                 self.phase = Phase::Stopping;
                 self.info(&format!("Stopping: {reason}"));
+            }
+            CrawlEvent::Paused => {
+                if self.phase == Phase::Running {
+                    self.phase = Phase::Paused;
+                }
+                self.info("Paused");
+            }
+            CrawlEvent::Resumed => {
+                if self.phase == Phase::Paused {
+                    self.phase = Phase::Running;
+                }
+                self.info("Resumed");
             }
             CrawlEvent::Rewriting { documents } => {
                 self.info(&format!("Rewriting links in {documents} pages"));
@@ -859,6 +878,10 @@ impl Progress {
             Phase::Running if self.checking => "Checking for missed files…".to_owned(),
             Phase::Running => "Copying…".to_owned(),
             Phase::Stopping => "Stopping after the requests in flight…".to_owned(),
+            Phase::Paused => {
+                "Paused: the requests in flight finish, then nothing new starts until you resume."
+                    .to_owned()
+            }
             Phase::Finished => self.summary.clone().unwrap_or_else(|| "Done.".to_owned()),
             Phase::Stopped => {
                 "Stopped. Copy the same site again to continue where it left off.".to_owned()

@@ -558,3 +558,58 @@ fn store_mark_stopped(store: &MemoryStore) {
     let mut store = store.clone();
     mc_core::StateStore::set_status(&mut store, CrawlStatus::Stopped).unwrap();
 }
+
+#[tokio::test]
+async fn pauses_and_resumes() {
+    let links: String = (0..6)
+        .map(|i| format!(r#"<a href="/p{i}">p</a>"#))
+        .collect();
+    let mut requester = MockRequester::new()
+        .route(url("https://site.test/"), MockRoute::html(links))
+        .route(
+            url("https://site.test/robots.txt"),
+            MockRoute::status(StatusCode::NOT_FOUND, ""),
+        );
+    for i in 0..6 {
+        requester = requester.route(
+            url(&format!("https://site.test/p{i}")),
+            MockRoute::html("x"),
+        );
+    }
+    let requester = Arc::new(requester);
+    let out = tempfile::tempdir().unwrap();
+    let mut config = config(out.path());
+    // Several workers, each waiting its turn for the one host: pausing must
+    // hold those already handed a URL, not only new ones.
+    config.concurrency = 4;
+    config.per_host_delay = Duration::from_millis(80);
+    let crawler = Crawler::new(config, requester.clone());
+    let control = crawler.stop_handle();
+    let mut events = crawler.subscribe();
+    let driver = async {
+        // Pause once the start page is saved.
+        loop {
+            if let Ok(CrawlEvent::Saved { .. }) = events.recv().await {
+                control.pause();
+                break;
+            }
+        }
+        loop {
+            if let Ok(CrawlEvent::Paused) = events.recv().await {
+                break;
+            }
+        }
+        let calls_when_paused = requester.calls().len();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(control.is_paused());
+        assert!(
+            requester.calls().len() <= calls_when_paused + 1,
+            "at most the request in flight finishes while paused"
+        );
+        control.resume();
+    };
+    let (summary, ()) = tokio::join!(crawler.run(), driver);
+    let summary = summary.unwrap();
+    assert_eq!(summary.saved, 7, "everything is copied after resuming");
+    assert!(summary.stopped.is_none());
+}
