@@ -2,7 +2,9 @@
 
 A lightweight website copier for offline browsing, written in Rust. See [PLAN.md](PLAN.md) for the design and milestones.
 
-**Status:** M3. Amel copies sites through a browser-impersonating HTTP client and rewrites their links to work offline. It retries transient failures, respects robots.txt, can stop and resume, updates a copy by downloading only what changed, and writes a report. With the `browser` feature it also renders JavaScript-built pages in Chromium and can log in through a real browser. The desktop app (M4) does all of this from a window, and copies can also be saved as WARC archives or zip files (M5).
+**Status:** M0–M5 done, M6 (distribution) in progress. Amel copies sites through a browser-impersonating HTTP client and rewrites their links to work offline. It retries transient failures, respects robots.txt, can stop and resume, updates a copy by downloading only what changed, and writes a report. With the `browser` feature it also renders JavaScript-built pages in Chromium and can log in through a real browser. The desktop app does all of this from a window, and copies can also be saved as WARC archives or zip files.
+
+![A copy in progress: four workers, the progress bar and live counters](docs/screenshots/copying-dark.png)
 
 ## Install
 
@@ -122,6 +124,23 @@ Build with `--features browser` to add a **Render JavaScript** option, which use
 
 On Linux the app needs the X11, Wayland and Vulkan development packages (`libxkbcommon-x11-dev libx11-xcb-dev libwayland-dev libvulkan-dev` on Debian/Ubuntu).
 
+#### Screenshots
+
+| | |
+|---|---|
+| ![Finished copy in the light theme, with the Activity list](docs/screenshots/done-light.png) | ![The log panel open under a finished copy](docs/screenshots/log-panel.png) |
+| Finished copy, light theme | Log panel |
+| ![Script tab: highlighted JavaScript and field suggestions after file.](docs/screenshots/script-tab.png) | ![Mini window over a paused copy](docs/screenshots/mini-paused.png) |
+| Script editor with suggestions | Mini window, paused |
+| ![Browser tab: browser, version and platform to impersonate](docs/screenshots/browser-tab.png) | ![Types tab: file types and size limits](docs/screenshots/types-tab.png) |
+| Browser to impersonate | File types and size limits |
+| ![Limits tab](docs/screenshots/limits-tab.png) | ![Rules tab with the URL tester](docs/screenshots/rules-tab.png) |
+| Limits | Rules and the URL tester |
+| ![Auth tab](docs/screenshots/auth-tab.png) | ![Proxy tab](docs/screenshots/proxy-tab.png) |
+| Auth | Proxies |
+| ![Output tab](docs/screenshots/output-tab.png) | ![Link map tab](docs/screenshots/linkmap-tab.png) |
+| Output: WARC and zip | Link map |
+
 ### JavaScript sites
 
 Build with the `browser` feature to render pages in Chromium through Playwright. The first build downloads the Playwright driver (about 135 MB) into `~/.cache/playwright-rust/`.
@@ -221,6 +240,8 @@ Exit codes:
 
 Files over 4 MiB are written to disk as they arrive, not kept in memory, under the copy's `.amel/partial/` folder. If the connection drops, the retry asks the server only for the rest (`Range`, guarded by `If-Range` so a changed file starts over), and the pieces are joined. In the app, each worker's row shows a progress bar for its file, such as "11.1 MiB / 20.0 MiB", and Size and Speed count what has arrived so far.
 
+![A worker downloading a 20 MB file: 11.1 MiB / 20.0 MiB](docs/screenshots/file-progress.png)
+
 ### Scripts
 
 A small JavaScript engine (QuickJS) runs hooks with a copy: `--script hooks.js` on the command line, or the **Script** tab in the app, which has an editable example. Define any of these:
@@ -247,10 +268,11 @@ The commands are now `amel` and `amel-gui`, and the settings live in `~/.config/
 | `crates/mc-requester-wreq` | The default requester: wreq with browser TLS/HTTP2 fingerprints |
 | `crates/mc-requester-playwright` | The browser requester: Chromium via Playwright (`browser` feature) |
 | `crates/mc-extract` | Finds and rewrites URLs in HTML and CSS |
-| `crates/mc-core` | The crawler: rules, URL → file path mapping, retries, robots.txt, limits, link rewriting, reports |
+| `crates/mc-core` | The crawler: rules, file types, URL → file path mapping, retries and slow-down, robots.txt, limits, link rewriting, reports, event descriptions for logs |
 | `crates/mc-store` | Crawl state in SQLite, for resume and update |
+| `crates/mc-script` | JavaScript hooks for copies, run in QuickJS |
 | `crates/mc-cli` | The `amel` binary |
-| `crates/mc-gui` | The `amel-gui` desktop app (gpui-kit) |
+| `crates/mc-gui` | The `amel-gui` desktop app (gpui-kit), with its log panel, script editor highlighting and completion |
 | `fixtures` | Local test websites and the server that hosts them (`mc-fixtures`), including `hostile`, a site full of traps, and `spa`, a JavaScript app |
 
 ## Development

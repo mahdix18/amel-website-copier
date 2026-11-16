@@ -458,6 +458,8 @@ Amel does not solve CAPTCHAs or interactive challenges, and the docs say users s
   - Checked:
     - 176 tests
     - In a nested X server: the colors per token kind, the `file.b` → `bytes` completion popup, and the column scrolling with the Script tab open.
+  - Ctrl+Space opens the suggestions (gpui-kit binds no key for it); with nothing typed they list every hook and keyword.
+- **Docs and screenshots (2026-11-16):** the README has a screenshot of a copy in progress and a gallery of every tab, the log panel, the script editor and the mini window, all retaken after the rename. The crate table lists `mc-script`.
 
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.
