@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
-use mc_core::{CrawlConfig, Credential, Rule, RuleAction};
+use mc_core::{CrawlConfig, Credential, FileType, Rule, RuleAction};
 use mc_requester::{
     CookieJar, HeaderMap, ProxyConfig, ProxyPicker, ProxyRotation, SharedResources, Url,
     parse_proxy_list,
@@ -16,12 +16,14 @@ use serde_json::{Map, Value};
 const MIB: u64 = 1024 * 1024;
 
 /// Environment variable read for `--auth HOST=USER` without a password.
-pub const PASSWORD_ENV: &str = "MISTERCOPY_PASSWORD";
+pub const PASSWORD_ENV: &str = "AMEL_PASSWORD";
+/// Its name before the rename, still read.
+const LEGACY_PASSWORD_ENV: &str = "MISTERCOPY_PASSWORD";
 
 #[derive(clap::Args, Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CrawlOptions {
-    /// Requester to fetch with (see `mistercopy requesters list`).
+    /// Requester to fetch with (see `amel requesters list`).
     #[arg(long, default_value = "wreq")]
     pub requester: String,
 
@@ -49,6 +51,26 @@ pub struct CrawlOptions {
     /// waits about twice as long (a server's Retry-After wins).
     #[arg(long, value_name = "MS", default_value_t = 1000)]
     pub retry_delay_ms: u64,
+
+    /// Smart slow-down: when a site answers 429 or 503, double the gap
+    /// between requests to it, and shrink it back after good answers.
+    #[arg(long)]
+    pub adaptive_delay: bool,
+
+    /// File types not to download, e.g. `video,audio,archive` (page, style,
+    /// script, image, font, video, audio, document, archive, data, other).
+    #[arg(long, value_name = "TYPES", value_delimiter = ',')]
+    pub skip_types: Vec<FileType>,
+
+    /// A size limit for one file type, in MiB, e.g. `video=200`; repeat
+    /// for several types. Larger files are skipped.
+    #[arg(long = "type-limit", value_name = "TYPE=MIB", value_parser = parse_type_limit)]
+    pub type_limits: Vec<(FileType, u64)>,
+
+    /// A JavaScript file of hooks run with the copy (onStart, shouldFetch,
+    /// onFile, onError, onFinish; log() prints).
+    #[arg(long, value_name = "FILE")]
+    pub script: Option<PathBuf>,
 
     /// Seconds before a request is abandoned.
     #[arg(long, default_value_t = 30)]
@@ -124,7 +146,7 @@ pub struct CrawlOptions {
     pub ignore_robots: bool,
 
     /// Chromium for `--requester playwright` or `auto`. Defaults to the
-    /// newest one Playwright installed (see `mistercopy browsers status`).
+    /// newest one Playwright installed (see `amel browsers status`).
     #[arg(long, value_name = "PATH")]
     pub browser_path: Option<PathBuf>,
 
@@ -181,6 +203,18 @@ fn one_or_many<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<
     })
 }
 
+/// `video=200`: a file type and its size limit in MiB.
+pub fn parse_type_limit(text: &str) -> Result<(FileType, u64), String> {
+    let (kind, mib) = text
+        .split_once('=')
+        .ok_or_else(|| format!("expected TYPE=MIB such as video=200, got `{text}`"))?;
+    let mib = mib
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{mib}` is not a whole number of MiB"))?;
+    Ok((kind.parse()?, mib))
+}
+
 /// `500K`, `2M`, `1.5m` or plain bytes, per second.
 pub fn parse_rate(text: &str) -> Result<u64, String> {
     let text = text.trim();
@@ -214,7 +248,7 @@ impl Default for CrawlOptions {
             #[command(flatten)]
             options: CrawlOptions,
         }
-        Defaults::parse_from(["mistercopy"]).options
+        Defaults::parse_from(["amel"]).options
     }
 }
 
@@ -232,6 +266,13 @@ impl CrawlOptions {
         config.per_host_delay = Duration::from_millis(self.delay_ms);
         config.max_retries = self.retries;
         config.retry_base_delay = Duration::from_millis(self.retry_delay_ms);
+        config.adaptive = self.adaptive_delay;
+        config.skip_types = self.skip_types.clone();
+        config.type_limits = self
+            .type_limits
+            .iter()
+            .map(|(kind, mib)| (*kind, mib.saturating_mul(MIB)))
+            .collect();
         config.respect_robots = !self.ignore_robots;
         config.warc = self.warc.clone();
         config.replay = self.replay;
@@ -334,7 +375,7 @@ impl CrawlOptions {
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct SessionArgs {
     /// HTTP Basic credentials: `HOST=USER:PASSWORD`, or `HOST=USER` to read
-    /// the password from $MISTERCOPY_PASSWORD.
+    /// the password from $AMEL_PASSWORD.
     #[arg(long, value_name = "HOST=USER[:PASSWORD]")]
     pub auth: Vec<String>,
 
@@ -376,7 +417,12 @@ impl SessionArgs {
         config.credentials = self
             .auth
             .iter()
-            .map(|spec| parse_credential(spec, std::env::var(PASSWORD_ENV).ok()))
+            .map(|spec| {
+                let password = std::env::var(PASSWORD_ENV)
+                    .or_else(|_| std::env::var(LEGACY_PASSWORD_ENV))
+                    .ok();
+                parse_credential(spec, password)
+            })
             .collect::<Result<_, _>>()?;
         config.headers = parse_headers(&self.headers)?;
         if let Some(path) = &self.cookies {
@@ -470,6 +516,30 @@ mod tests {
             ..CrawlOptions::default()
         };
         assert!(bad.proxy_config().unwrap_err().contains("must start with"));
+    }
+
+    #[test]
+    fn parses_type_rules() {
+        assert_eq!(parse_type_limit("video=200"), Ok((FileType::Video, 200)));
+        assert_eq!(parse_type_limit("images=5"), Ok((FileType::Image, 5)));
+        assert!(parse_type_limit("video").is_err());
+        assert!(parse_type_limit("movie=5").is_err());
+        let options = CrawlOptions {
+            skip_types: vec![FileType::Audio],
+            type_limits: vec![(FileType::Video, 2)],
+            ..CrawlOptions::default()
+        };
+        let config = options
+            .crawl_config(
+                Url::parse("https://s.test/").unwrap(),
+                PathBuf::from("/out"),
+            )
+            .unwrap();
+        assert_eq!(config.skip_types, [FileType::Audio]);
+        assert_eq!(config.type_limits, [(FileType::Video, 2 * MIB)]);
+        let saved = serde_json::to_string(&options).unwrap();
+        let back: CrawlOptions = serde_json::from_str(&saved).unwrap();
+        assert_eq!(back.type_limits, options.type_limits);
     }
 
     #[test]

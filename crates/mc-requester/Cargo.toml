@@ -1,6 +1,6 @@
 [package]
 name = "mc-requester"
-description = "The Requester trait that every MisterCopy fetch backend implements"
+description = "The Requester trait that every Amel fetch backend implements"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

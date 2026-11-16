@@ -162,6 +162,7 @@ impl Requester for MockRequester {
             .unwrap_or_else(PoisonError::into_inner)
             .push(request.clone());
 
+        let limit = request.max_body_bytes;
         let mut url = request.url;
         let mut redirects = Vec::new();
         loop {
@@ -188,6 +189,9 @@ impl Requester for MockRequester {
                     continue;
                 }
             };
+            if let Some(limit) = limit.filter(|limit| body.len() as u64 > *limit) {
+                return Err(FetchError::TooLarge { limit });
+            }
             let mut response = FetchResponse::new(url, status, headers, Body::Bytes(body));
             response.redirects = redirects;
             return Ok(response);

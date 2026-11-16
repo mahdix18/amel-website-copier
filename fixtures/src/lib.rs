@@ -1,4 +1,4 @@
-//! Local websites for MisterCopy's tests, served over real HTTP on loopback.
+//! Local websites for Amel's tests, served over real HTTP on loopback.
 //!
 //! Each [`Site`] is a directory under `fixtures/sites/` exercising one class of
 //! problem. More sites (`spa-react`, `auth`) arrive with the milestones that
@@ -8,6 +8,7 @@ pub mod auth;
 mod proxy;
 pub use proxy::{PROXY_PASSWORD, PROXY_USER, ProxyServer};
 mod hostile;
+pub use hostile::{BIG_BYTES, big_byte};
 
 use std::fmt;
 use std::io;

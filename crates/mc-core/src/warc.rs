@@ -40,7 +40,7 @@ impl WarcWriter {
         };
         if is_new {
             let info = format!(
-                "software: MisterCopy {}\r\nformat: WARC File Format 1.1\r\n",
+                "software: Amel Website Copier {}\r\nformat: WARC File Format 1.1\r\n",
                 env!("CARGO_PKG_VERSION")
             );
             writer.record("warcinfo", None, "application/warc-fields", info.as_bytes())?;

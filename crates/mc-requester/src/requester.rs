@@ -71,7 +71,7 @@ impl Default for SharedResources {
 pub trait RequesterFactory: Send + Sync + 'static {
     fn id(&self) -> &'static str;
 
-    /// Reported without building, for `mistercopy requesters list` and the GUI.
+    /// Reported without building, for `amel requesters list` and the GUI.
     fn capabilities(&self) -> Capabilities;
 
     fn build(

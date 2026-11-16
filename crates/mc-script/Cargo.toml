@@ -1,0 +1,18 @@
+[package]
+name = "mc-script"
+description = "JavaScript hooks (QuickJS) for copies: on start, per file, on finish"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+mc-core.workspace = true
+rquickjs = { version = "0.14", features = ["parallel"] }
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,5 +1,5 @@
 //! JavaScript-built pages, end to end with real Chromium. Needs the
-//! `browser` feature and a Chromium from `mistercopy browsers install`;
+//! `browser` feature and a Chromium from `amel browsers install`;
 //! the tests skip, saying so, when no browser is installed.
 
 #![cfg(feature = "browser")]
@@ -21,7 +21,7 @@ use mc_requester_wreq::WreqFactory;
 fn browser_available() -> bool {
     let found = !installed_chromium().is_empty();
     if !found {
-        eprintln!("skipping: no Chromium installed (run `mistercopy browsers install`)");
+        eprintln!("skipping: no Chromium installed (run `amel browsers install`)");
     }
     found
 }
@@ -186,7 +186,7 @@ async fn replay_answers_fetches_offline() {
     let data = root.join("data.html");
     let html = std::fs::read_to_string(&data).unwrap();
     assert!(
-        html.contains(r#"<script src="mistercopy-replay.js"></script>"#),
+        html.contains(r#"<script src="amel-replay.js"></script>"#),
         "{html}"
     );
     assert!(root.join(mc_core::REPLAY_SCRIPT).is_file());

@@ -1,4 +1,4 @@
-//! The default MisterCopy requester.
+//! The default Amel requester.
 //!
 //! [wreq] presents the TLS, HTTP/2 and header fingerprint of a real browser
 //! profile, so sites that turn away non-browser clients still copy correctly.
@@ -78,7 +78,7 @@ pub fn check_impersonation(profile: Option<&str>, platform: Option<&str>) -> Res
         && !profiles().iter().any(|known| known == name)
     {
         return Err(format!(
-            "unknown browser profile `{name}`; `mistercopy requesters profiles` lists them"
+            "unknown browser profile `{name}`; `amel requesters profiles` lists them"
         ));
     }
     if let Some(name) = platform
@@ -206,6 +206,12 @@ impl Requester for WreqRequester {
         let mut url = request.url.clone();
         let mut redirects = Vec::new();
         let mut headers = request.headers.clone();
+        // What an earlier, interrupted attempt left of this body.
+        let mut resume = context
+            .partial_dir
+            .as_deref()
+            .filter(|_| request.method == mc_requester::Method::GET)
+            .and_then(|dir| Partial::find(dir, &request.url));
 
         loop {
             if !matches!(url.scheme(), "http" | "https") {
@@ -222,6 +228,13 @@ impl Requester for WreqRequester {
             }
             if let Some(timeout) = request.timeout {
                 builder = builder.timeout(timeout);
+            }
+            // Ask only for the rest, and only if it is still the same file.
+            let resuming = resume.as_ref().filter(|_| redirects.is_empty());
+            if let Some(partial) = resuming {
+                builder = builder
+                    .header(header::RANGE, format!("bytes={}-", partial.size))
+                    .header(header::IF_RANGE, partial.validator.as_str());
             }
 
             if let Some(referrer) = &context.referrer
@@ -273,31 +286,252 @@ impl Requester for WreqRequester {
                 }
             }
 
+            if status == mc_requester::StatusCode::RANGE_NOT_SATISFIABLE && resume.is_some() {
+                // The partial file no longer fits the resource: start over.
+                if let Some(partial) = resume.take() {
+                    partial.discard();
+                }
+                continue;
+            }
             let headers = response.headers().clone();
-            let limit = self.max_body_bytes;
-            if response.content_length().is_some_and(|len| len > limit) {
+            let limit = request
+                .max_body_bytes
+                .map_or(self.max_body_bytes, |limit| limit.min(self.max_body_bytes));
+            // A 206 continues the partial file; anything else replaces it.
+            let offset = match (&resume, status.as_u16()) {
+                (Some(partial), 206) if content_range_start(&headers) == Some(partial.size) => {
+                    partial.size
+                }
+                _ => 0,
+            };
+            let total = response.content_length().map(|len| len + offset);
+            if total.is_some_and(|len| len > limit) {
                 return Err(FetchError::TooLarge { limit });
             }
-            let mut body = Vec::new();
+            let mut sink = BodySink::new(
+                context.partial_dir.as_deref(),
+                &request.url,
+                offset,
+                total,
+                validator(&headers),
+            )
+            .await
+            .map_err(|e| FetchError::Other(Box::new(e)))?;
             let mut stream = pin!(response.bytes_stream());
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(fetch_error)?;
-                if body.len() as u64 + chunk.len() as u64 > limit {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    // What arrived stays on disk for the next attempt.
+                    Err(error) => {
+                        sink.keep().await;
+                        return Err(fetch_error(error));
+                    }
+                };
+                if sink.received + chunk.len() as u64 > limit {
+                    sink.discard().await;
                     return Err(FetchError::TooLarge { limit });
                 }
-                body.extend_from_slice(&chunk);
+                sink.write(&chunk)
+                    .await
+                    .map_err(|e| FetchError::Other(Box::new(e)))?;
+                if let Some(progress) = &context.progress {
+                    progress.report(sink.received, total);
+                }
             }
-
-            let mut fetched =
-                FetchResponse::new(Url::clone(&url), status, headers, body_from(body));
+            let status = if offset > 0 {
+                mc_requester::StatusCode::OK
+            } else {
+                status
+            };
+            let body = sink
+                .finish()
+                .await
+                .map_err(|e| FetchError::Other(Box::new(e)))?;
+            let mut fetched = FetchResponse::new(Url::clone(&url), status, headers, body);
             fetched.redirects = redirects;
             return Ok(fetched);
         }
     }
 }
 
-fn body_from(bytes: Vec<u8>) -> mc_requester::Body {
-    mc_requester::Body::Bytes(bytes.into())
+/// Bodies past this size go to a file in the partial folder (when the
+/// crawl gives one), so they don't sit in memory and can be resumed.
+const SPILL_BYTES: u64 = 4 * 1024 * 1024;
+
+/// What an interrupted download left: the bytes so far and the validator
+/// (`ETag` or `Last-Modified`) that says whether the rest still matches.
+struct Partial {
+    path: std::path::PathBuf,
+    meta: std::path::PathBuf,
+    size: u64,
+    validator: String,
+}
+
+impl Partial {
+    fn paths(dir: &std::path::Path, url: &Url) -> (std::path::PathBuf, std::path::PathBuf) {
+        let key = format!("{:016x}", fnv(url.as_str().as_bytes()));
+        (
+            dir.join(format!("{key}.part")),
+            dir.join(format!("{key}.meta")),
+        )
+    }
+
+    fn find(dir: &std::path::Path, url: &Url) -> Option<Self> {
+        let (path, meta) = Self::paths(dir, url);
+        let validator = std::fs::read_to_string(&meta).ok()?.trim().to_owned();
+        let size = std::fs::metadata(&path).ok()?.len();
+        (size > 0 && !validator.is_empty()).then_some(Self {
+            path,
+            meta,
+            size,
+            validator,
+        })
+    }
+
+    fn discard(self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_file(&self.meta);
+    }
+}
+
+/// Where a body goes as it arrives: memory while small, a partial file
+/// once large (or when continuing one).
+struct BodySink {
+    memory: Vec<u8>,
+    file: Option<tokio::fs::File>,
+    paths: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    validator: Option<String>,
+    expected: Option<u64>,
+    received: u64,
+}
+
+impl BodySink {
+    async fn new(
+        dir: Option<&std::path::Path>,
+        url: &Url,
+        offset: u64,
+        total: Option<u64>,
+        validator: Option<String>,
+    ) -> std::io::Result<Self> {
+        let paths = dir.map(|dir| Partial::paths(dir, url));
+        let mut sink = Self {
+            memory: Vec::new(),
+            file: None,
+            paths,
+            validator,
+            expected: total,
+            received: offset,
+        };
+        if offset > 0 {
+            if let Some((path, _)) = &sink.paths {
+                let file = tokio::fs::OpenOptions::new()
+                    .append(true)
+                    .open(path)
+                    .await?;
+                sink.file = Some(file);
+            }
+        } else if total.is_some_and(|len| len > SPILL_BYTES) {
+            sink.spill().await?;
+        }
+        Ok(sink)
+    }
+
+    /// Moves to a fresh partial file, with its validator written beside it.
+    async fn spill(&mut self) -> std::io::Result<()> {
+        let Some((path, meta)) = &self.paths else {
+            return Ok(());
+        };
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir).await?;
+        }
+        let mut file = tokio::fs::File::create(path).await?;
+        tokio::io::AsyncWriteExt::write_all(&mut file, &self.memory).await?;
+        match &self.validator {
+            Some(validator) => tokio::fs::write(meta, validator).await?,
+            None => {
+                let _ = tokio::fs::remove_file(meta).await;
+            }
+        }
+        self.memory = Vec::new();
+        self.file = Some(file);
+        Ok(())
+    }
+
+    async fn write(&mut self, chunk: &[u8]) -> std::io::Result<()> {
+        if self.file.is_none() && (self.memory.len() + chunk.len()) as u64 > SPILL_BYTES {
+            self.spill().await?;
+        }
+        match &mut self.file {
+            Some(file) => tokio::io::AsyncWriteExt::write_all(file, chunk).await?,
+            None => self.memory.extend_from_slice(chunk),
+        }
+        self.received += chunk.len() as u64;
+        Ok(())
+    }
+
+    /// The connection dropped: keep the partial file to resume from.
+    async fn keep(&mut self) {
+        if let Some(file) = &mut self.file {
+            let _ = tokio::io::AsyncWriteExt::flush(file).await;
+        }
+    }
+
+    async fn discard(&mut self) {
+        self.file = None;
+        if let Some((path, meta)) = &self.paths {
+            let _ = tokio::fs::remove_file(path).await;
+            let _ = tokio::fs::remove_file(meta).await;
+        }
+    }
+
+    async fn finish(mut self) -> std::io::Result<mc_requester::Body> {
+        let Some(mut file) = self.file.take() else {
+            return Ok(mc_requester::Body::Bytes(self.memory.into()));
+        };
+        tokio::io::AsyncWriteExt::flush(&mut file).await?;
+        let Some((path, meta)) = self.paths.take() else {
+            return Ok(mc_requester::Body::Bytes(self.memory.into()));
+        };
+        if self
+            .expected
+            .is_some_and(|expected| expected != self.received)
+        {
+            return Err(std::io::Error::other(format!(
+                "body ended at {} of {} bytes",
+                self.received,
+                self.expected.unwrap_or_default()
+            )));
+        }
+        // Complete: no longer something to resume.
+        let _ = tokio::fs::remove_file(meta).await;
+        Ok(mc_requester::Body::File(path))
+    }
+}
+
+/// The validator `If-Range` can carry: a strong `ETag`, else `Last-Modified`.
+fn validator(headers: &mc_requester::HeaderMap) -> Option<String> {
+    let get = |name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+    };
+    get(header::ETAG)
+        .filter(|etag| !etag.starts_with("W/"))
+        .or_else(|| get(header::LAST_MODIFIED))
+}
+
+/// The first byte a `Content-Range: bytes START-END/TOTAL` answer carries.
+fn content_range_start(headers: &mc_requester::HeaderMap) -> Option<u64> {
+    let value = headers.get(header::CONTENT_RANGE)?.to_str().ok()?;
+    let range = value.strip_prefix("bytes ")?;
+    range.split('-').next()?.trim().parse().ok()
+}
+
+fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 impl WreqRequester {

@@ -642,7 +642,7 @@ pub async fn interactive_login_until(
 /// Cookies in the Netscape `cookies.txt` format.
 pub fn netscape_cookies(cookies: &[Cookie]) -> String {
     let mut text = String::from(
-        "# Netscape HTTP Cookie File\n# Saved by MisterCopy. Contains a login session: keep it private.\n",
+        "# Netscape HTTP Cookie File\n# Saved by Amel. Contains a login session: keep it private.\n",
     );
     for cookie in cookies {
         let bool_field = |flag: bool| if flag { "TRUE" } else { "FALSE" };
@@ -851,14 +851,13 @@ mod tests {
         );
         assert!(step(serde_json::json!({})).action().is_err());
         assert!(serde_json::from_value::<LoginStep>(serde_json::json!({"tap": "x"})).is_err());
-        let missing =
-            step(serde_json::json!({"fill": "#p", "value_env": "MISTERCOPY_SURELY_UNSET_VAR"}));
+        let missing = step(serde_json::json!({"fill": "#p", "value_env": "AMEL_SURELY_UNSET_VAR"}));
         assert!(
             missing
                 .action()
                 .err()
                 .unwrap()
-                .contains("MISTERCOPY_SURELY_UNSET_VAR")
+                .contains("AMEL_SURELY_UNSET_VAR")
         );
     }
 

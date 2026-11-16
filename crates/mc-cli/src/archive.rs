@@ -84,11 +84,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path();
         std::fs::create_dir_all(out.join("site.test/posts")).unwrap();
-        std::fs::create_dir_all(out.join(".mistercopy")).unwrap();
+        std::fs::create_dir_all(out.join(".amel")).unwrap();
         std::fs::write(out.join("site.test/index.html"), "<p>home</p>").unwrap();
         std::fs::write(out.join("site.test/posts/a b.html"), "<p>a</p>").unwrap();
-        std::fs::write(out.join("mistercopy-report.html"), "report").unwrap();
-        std::fs::write(out.join(".mistercopy/state.db"), "secret state").unwrap();
+        std::fs::write(out.join("amel-report.html"), "report").unwrap();
+        std::fs::write(out.join(".amel/state.db"), "secret state").unwrap();
 
         let zip_path = zip_copy(out).unwrap();
         assert_eq!(zip_path, out.join("site.test.zip"));
@@ -103,7 +103,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "mistercopy-report.html",
+                "amel-report.html",
                 "site.test/index.html",
                 "site.test/posts/a b.html"
             ]

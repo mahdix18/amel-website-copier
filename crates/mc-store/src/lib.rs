@@ -1,4 +1,4 @@
-//! Crawl state in SQLite, at `<output>/.mistercopy/state.db`.
+//! Crawl state in SQLite, at `<output>/.amel/state.db`.
 //!
 //! One row per normalized URL, written through as the crawl goes, so an
 //! interrupted copy can be resumed and a finished one updated.
@@ -29,6 +29,20 @@ fn store_error(error: impl std::error::Error + Send + Sync + 'static) -> StoreEr
     StoreError::new(error)
 }
 
+/// Copies made before the rename keep their state in `.mistercopy`; it
+/// moves to the new name the first time the copy is opened, so `resume`
+/// and `update` go on working.
+fn migrate_legacy(output: &Path) {
+    let legacy = output.join(LEGACY_STATE_DIR);
+    let current = output.join(STATE_DIR);
+    if legacy.is_dir() && !current.exists() {
+        let _ = std::fs::rename(legacy, current);
+    }
+}
+
+/// The state folder's name before the rename.
+const LEGACY_STATE_DIR: &str = ".mistercopy";
+
 impl SqliteStore {
     pub fn path_in(output: &Path) -> PathBuf {
         output.join(STATE_DIR).join(DB_FILE)
@@ -36,11 +50,13 @@ impl SqliteStore {
 
     /// Whether `output` holds state from an earlier crawl.
     pub fn exists_in(output: &Path) -> bool {
+        migrate_legacy(output);
         Self::path_in(output).is_file()
     }
 
     /// Opens, or creates, the state for the copy in `output`.
     pub fn open(output: &Path) -> Result<Self, StoreError> {
+        migrate_legacy(output);
         let path = Self::path_in(output);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(store_error)?;
@@ -61,7 +77,7 @@ impl SqliteStore {
             Some(version) if version == SCHEMA_VERSION => {}
             Some(version) => {
                 return Err(StoreError::new(format!(
-                    "{} was written by an incompatible MisterCopy (schema {version})",
+                    "{} was written by an incompatible Amel (schema {version})",
                     path.display()
                 )));
             }

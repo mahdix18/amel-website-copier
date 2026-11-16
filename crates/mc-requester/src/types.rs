@@ -17,6 +17,8 @@ pub struct FetchRequest {
     pub validators: Option<Validators>,
     /// Overrides the requester's default timeout for this request.
     pub timeout: Option<Duration>,
+    /// A tighter size limit for this response than the requester's own.
+    pub max_body_bytes: Option<u64>,
 }
 
 impl FetchRequest {
@@ -27,6 +29,7 @@ impl FetchRequest {
             headers: HeaderMap::new(),
             validators: None,
             timeout: None,
+            max_body_bytes: None,
         }
     }
 }
@@ -46,6 +49,28 @@ pub struct FetchContext {
     pub depth: u32,
     /// Zero for the first try, incremented on each retry.
     pub attempt: u32,
+    /// Told the bytes received so far, and the total when known, as a body
+    /// arrives.
+    pub progress: Option<ProgressSink>,
+    /// Where large bodies are written as they arrive, so a dropped
+    /// connection can resume from what was received (`Range` requests).
+    pub partial_dir: Option<PathBuf>,
+}
+
+/// A callback for download progress: `(received, total)`.
+#[derive(Clone)]
+pub struct ProgressSink(pub std::sync::Arc<dyn Fn(u64, Option<u64>) + Send + Sync>);
+
+impl ProgressSink {
+    pub fn report(&self, received: u64, total: Option<u64>) {
+        (self.0)(received, total);
+    }
+}
+
+impl std::fmt::Debug for ProgressSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProgressSink")
+    }
 }
 
 /// A response body, kept in memory or spilled to a temporary file when large.

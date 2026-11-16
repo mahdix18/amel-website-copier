@@ -7,8 +7,8 @@ use texting_robots::Robot;
 use url::Url;
 
 /// The product token matched against `User-agent` lines. Groups for
-/// `MisterCopy` apply, then `*`.
-pub(crate) const AGENT: &str = "MisterCopy";
+/// `AmelCopier` apply, then `*`.
+pub(crate) const AGENT: &str = "AmelCopier";
 
 /// Longest `Crawl-delay` honoured, so one odd robots.txt can't stall a crawl.
 const MAX_CRAWL_DELAY: Duration = Duration::from_secs(60);
@@ -91,7 +91,7 @@ mod tests {
 
     #[test]
     fn applies_our_group_then_the_wildcard() {
-        let body = "User-agent: *\nDisallow: /private/\n\nUser-agent: MisterCopy\nDisallow: /no-copies/\nCrawl-delay: 2\n";
+        let body = "User-agent: *\nDisallow: /private/\n\nUser-agent: AmelCopier\nDisallow: /no-copies/\nCrawl-delay: 2\n";
         let (rules, delay) = RobotsRules::from_fetch(&fetched(200, body));
         assert!(!rules.allows(&url("/no-copies/x")));
         // Our own group replaces `*` entirely.

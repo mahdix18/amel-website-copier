@@ -1,6 +1,6 @@
 [package]
 name = "mc-core"
-description = "MisterCopy's crawler: scheduling, rules, URL-to-path mapping and link rewriting"
+description = "Amel's crawler: scheduling, rules, URL-to-path mapping and link rewriting"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

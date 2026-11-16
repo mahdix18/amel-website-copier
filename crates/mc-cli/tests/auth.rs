@@ -11,8 +11,8 @@ use common::host_dir;
 use mc_fixtures::auth::{PASSWORD, SESSION_COOKIE, USERNAME};
 use mc_fixtures::{FixtureServer, Site};
 
-async fn mistercopy(args: &[&str]) -> Output {
-    tokio::process::Command::new(env!("CARGO_BIN_EXE_mistercopy"))
+async fn amel(args: &[&str]) -> Output {
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_amel"))
         .args(args)
         .output()
         .await
@@ -30,7 +30,7 @@ async fn basic_auth_unlocks_the_basic_area() {
     let host = server.addr().ip().to_string();
 
     let without = tempfile::tempdir().unwrap();
-    let denied = mistercopy(&[
+    let denied = amel(&[
         "copy",
         seed.as_str(),
         "--delay-ms",
@@ -45,7 +45,7 @@ async fn basic_auth_unlocks_the_basic_area() {
 
     let with = tempfile::tempdir().unwrap();
     let auth = format!("{host}={USERNAME}");
-    let allowed = tokio::process::Command::new(env!("CARGO_BIN_EXE_mistercopy"))
+    let allowed = tokio::process::Command::new(env!("CARGO_BIN_EXE_amel"))
         .args([
             "copy",
             seed.as_str(),
@@ -58,7 +58,7 @@ async fn basic_auth_unlocks_the_basic_area() {
             with.path().to_str().unwrap(),
         ])
         // The password comes from the environment, not the command line.
-        .env("MISTERCOPY_PASSWORD", PASSWORD)
+        .env("AMEL_PASSWORD", PASSWORD)
         .output()
         .await
         .unwrap();
@@ -85,7 +85,7 @@ async fn cookie_file_opens_the_members_area_without_logging_out() {
     .unwrap();
     let dir = out.path().join("copy");
 
-    let copied = mistercopy(&[
+    let copied = amel(&[
         "copy",
         server.url("/members/").as_str(),
         "--delay-ms",
@@ -123,7 +123,7 @@ async fn login_script_needs_a_browser_requester() {
     let out = tempfile::tempdir().unwrap();
     let script = out.path().join("login.json");
     std::fs::write(&script, "[]").unwrap();
-    let refused = mistercopy(&[
+    let refused = amel(&[
         "copy",
         "http://127.0.0.1:9/",
         "--login-script",
@@ -140,7 +140,7 @@ async fn login_script_needs_a_browser_requester() {
 #[tokio::test]
 async fn scripted_login_shares_the_session_with_plain_http() {
     if mc_requester_playwright::installed_chromium().is_empty() {
-        eprintln!("skipping: no Chromium installed (run `mistercopy browsers install`)");
+        eprintln!("skipping: no Chromium installed (run `amel browsers install`)");
         return;
     }
     let server = FixtureServer::start(Site::Auth).await.unwrap();
@@ -149,7 +149,7 @@ async fn scripted_login_shares_the_session_with_plain_http() {
     let steps = serde_json::json!([
         { "goto": server.url("/login").as_str() },
         { "fill": "#username", "value": USERNAME },
-        { "fill": "#password", "value_env": "MISTERCOPY_TEST_PASSWORD" },
+        { "fill": "#password", "value_env": "AMEL_TEST_PASSWORD" },
         { "click": "button[type=submit]" },
         { "wait_for": ".welcome" },
     ]);
@@ -158,7 +158,7 @@ async fn scripted_login_shares_the_session_with_plain_http() {
 
     // `auto` logs in with Chromium, then copies the plain pages over HTTP
     // using the session the browser obtained.
-    let copied = tokio::process::Command::new(env!("CARGO_BIN_EXE_mistercopy"))
+    let copied = tokio::process::Command::new(env!("CARGO_BIN_EXE_amel"))
         .args([
             "copy",
             server.url("/members/").as_str(),
@@ -172,7 +172,7 @@ async fn scripted_login_shares_the_session_with_plain_http() {
             "-o",
             dir.to_str().unwrap(),
         ])
-        .env("MISTERCOPY_TEST_PASSWORD", PASSWORD)
+        .env("AMEL_TEST_PASSWORD", PASSWORD)
         .output()
         .await
         .unwrap();

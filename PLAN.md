@@ -1,8 +1,8 @@
-# MisterCopy — Product & Architecture Plan
+# Amel Website Copier — Product & Architecture Plan
 
 _Draft v2 · 2026-11-11_
 
-MisterCopy is a lightweight website copier written in Rust. It runs on Windows, macOS and Linux, and copies sites for offline browsing and archiving. Pages are fetched through **pluggable requesters**. The first two are a browser-impersonating HTTP client (**wreq**) and a full browser (**Playwright**). The app ships as a CLI and as a fast native GUI built with **gpui-kit**.
+Amel is a lightweight website copier written in Rust. It runs on Windows, macOS and Linux, and copies sites for offline browsing and archiving. Pages are fetched through **pluggable requesters**. The first two are a browser-impersonating HTTP client (**wreq**) and a full browser (**Playwright**). The app ships as a CLI and as a fast native GUI built with **gpui-kit**.
 
 ---
 
@@ -10,7 +10,7 @@ MisterCopy is a lightweight website copier written in Rust. It runs on Windows, 
 
 Existing tools (Cyotek WebCopy, HTTrack, `wget --mirror`) share the same gaps:
 
-| Gap in existing tools | MisterCopy answer |
+| Gap in existing tools | Amel answer |
 |---|---|
 | No JavaScript execution, so SPAs and lazy-loaded content are missed | **Playwright requester** renders pages, captures every network response, and scrolls to trigger lazy loading |
 | Plain HTTP clients get blocked or served degraded pages by sites that reject non-browser traffic | **wreq requester** speaks with real browser TLS/HTTP2 fingerprints (Chrome, Firefox, Safari profiles) |
@@ -48,7 +48,7 @@ Existing tools (Cyotek WebCopy, HTTrack, `wget --mirror`) share the same gaps:
 | Cookies | `cookie_store` | One jar shared by all requesters |
 | Logging | `tracing` + `tracing-subscriber` (JSON option) | |
 
-**Lightweight by default:** Playwright is an optional cargo feature (`browser`), and its driver and browsers are installed only when first needed (`mistercopy browsers install`). Without it, the CLI binary should stay well under 20 MB.
+**Lightweight by default:** Playwright is an optional cargo feature (`browser`), and its driver and browsers are installed only when first needed (`amel browsers install`). Without it, the CLI binary should stay well under 20 MB.
 
 **Build dependencies:** wreq builds BoringSSL, so contributors and CI need `cmake`, `clang`/`libclang` and `perl`/`nasm` (Windows). GPUI on Linux needs the Vulkan, Wayland/X11 and `xkbcommon` development packages. Both lists get documented in `CONTRIBUTING.md`.
 
@@ -63,8 +63,8 @@ crates/
   mc-extract/              HTML / CSS / sitemap link extraction
   mc-store/                SQLite crawl state + output writers (dir, WARC, zip)
   mc-config/               project.yaml model, validation, JSON Schema
-  mc-cli/                  `mistercopy` binary
-  mc-gui/                  `mistercopy-gui` binary (gpui-kit)
+  mc-cli/                  `amel` binary
+  mc-gui/                  `amel-gui` binary (gpui-kit)
 fixtures/                  local test websites + axum fixture server
 ```
 
@@ -145,7 +145,7 @@ pub trait RequesterFactory: Send + Sync {
 - **Auto-scroll** and optional "click to expand" selectors trigger lazy content.
 - `rendered_dom` (the serialized DOM after rendering) is saved by default. Raw server HTML is an option.
 - Cookies are synced both ways with the shared jar, so a login done in the browser carries over to wreq.
-- The driver and browsers are managed by `mistercopy browsers install|status|remove`.
+- The driver and browsers are managed by `amel browsers install|status|remove`.
 
 ### 4.4 Choosing a requester
 - `requester:` is set globally and can be overridden per rule (for example `^/app/` → `playwright`).
@@ -200,7 +200,7 @@ Tests: golden tables plus `proptest` properties (always valid on Windows, same o
 
 ### 4.9 Rewriter
 - `lol_html` streaming rewrite of every extracted reference to a **relative, percent-encoded** local path. CSS is rewritten through the CSS extractor's spans.
-- Rewriting always starts from a pristine copy of each document kept in `.mistercopy/originals/`. That makes it safe to run again after a resume, and lets `update` crawl onward from pages the server reports unchanged (304).
+- Rewriting always starts from a pristine copy of each document kept in `.amel/originals/`. That makes it safe to run again after a resume, and lets `update` crawl onward from pages the server reports unchanged (304).
 - References that are out of scope or excluded stay absolute (or point to a local "not copied" stub page).
 - Removes `<base>`, `integrity=` on modified resources and CSP meta tags that would block local files.
 - **Offline replay shim (experimental, M5):** for pages fetched with Playwright, an injected script serves recorded `fetch`/XHR responses from a local manifest, so client-side data loads work offline.
@@ -209,7 +209,7 @@ Tests: golden tables plus `proptest` properties (always valid on Windows, same o
 - Basic and digest credentials per host, custom headers and bearer tokens.
 - Import cookies from a Netscape cookies.txt file or browser-export JSON.
 - **Scripted login** (Playwright): steps like `goto`, `fill`, `click`, `wait_for`. The cookies land in the shared jar.
-- **Interactive login:** `mistercopy login <url>` (or a GUI button) opens a headed browser, the user logs in by hand, and the session is saved to the project.
+- **Interactive login:** `amel login <url>` (or a GUI button) opens a headed browser, the user logs in by hand, and the session is saved to the project.
 - Logout and destructive URLs (`/logout`, `/delete`, non-GET forms) are excluded by default.
 
 ### 4.11 Output & reporting
@@ -219,23 +219,23 @@ Tests: golden tables plus `proptest` properties (always valid on Windows, same o
 
 ## 5. Interfaces
 
-### CLI (`mistercopy`)
+### CLI (`amel`)
 ```bash
-mistercopy copy https://example.com -o ./out
-mistercopy copy https://example.com --impersonate firefox --concurrency 8
-mistercopy copy https://app.example.com --requester playwright --scroll --max-pages 500
-mistercopy copy https://example.com --requester auto      # wreq, escalate to browser when needed
-mistercopy copy -c project.yaml
-mistercopy resume ./out
-mistercopy update ./out                                   # conditional GETs only
-mistercopy scan https://example.com                       # audit, no files written
-mistercopy login https://example.com -c project.yaml
-mistercopy requesters list                                # registered requesters + capabilities
-mistercopy browsers install
+amel copy https://example.com -o ./out
+amel copy https://example.com --impersonate firefox --concurrency 8
+amel copy https://app.example.com --requester playwright --scroll --max-pages 500
+amel copy https://example.com --requester auto      # wreq, escalate to browser when needed
+amel copy -c project.yaml
+amel resume ./out
+amel update ./out                                   # conditional GETs only
+amel scan https://example.com                       # audit, no files written
+amel login https://example.com -c project.yaml
+amel requesters list                                # registered requesters + capabilities
+amel browsers install
 ```
 Exit codes: 0 = done, 1 = finished with some URL errors, 2 = config or input error, 3 = aborted.
 
-### GUI (`mistercopy-gui`, gpui-kit)
+### GUI (`amel-gui`, gpui-kit)
 A modern, lightweight native app sharing `mc-core` in-process.
 
 - **Projects sidebar:** recent projects, a "New copy" button and a quick URL bar on top ("paste a URL → Copy").
@@ -256,7 +256,7 @@ Impersonation is there for **compatibility**, so sites that refuse non-browser c
 - 1 request/s per host
 - low concurrency
 
-MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say users should only copy sites they're allowed to.
+Amel does not solve CAPTCHAs or interactive challenges, and the docs say users should only copy sites they're allowed to.
 
 ## 8. Testing strategy
 - **Unit:** normalizer, path mapper (golden + `proptest`), extractors, rules engine, retry policy, requester registry. Snapshot tests with `insta`.
@@ -290,12 +290,12 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - the Playwright requester, behind the `browser` feature, using an already installed Chromium when there is one
   - network capture and auto-scroll
   - the `auto` hybrid, which also falls back to the browser on a 403
-  - scripted login (`--login-script`, run before the first request) and interactive login (`mistercopy login`, saved as `cookies.txt`)
+  - scripted login (`--login-script`, run before the first request) and interactive login (`amel login`, saved as `cookies.txt`)
   - logout links skipped by default
   - `browsers status|install`
   - the `spa` fixture (vanilla JavaScript rather than React) and the `auth` fixture
 - **Deferred from M3:** choosing a requester per rule (one requester per crawl for now).
-- **M4 done, except the performance targets.** `mistercopy-gui` (gpui-kit 0.9.1) has:
+- **M4 done, except the performance targets.** `amel-gui` (gpui-kit 0.9.1) has:
   - a copies sidebar, remembered across launches
   - the copy form with Copy, Update, Stop and Open report, plus live counters and a log
   - a Rules tab with a live tester that uses the crawler's own rule engine
@@ -303,7 +303,7 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - a command palette (Ctrl+K)
   - shared state with the CLI
   - headless UI tests covering each feature
-- **Performance targets missed:** cold start and idle memory both come out about twice the targets. Measured 2026-11-11 with a release build on this Linux/Wayland machine, using the built-in `MISTERCOPY_PROBE=1`:
+- **Performance targets missed:** cold start and idle memory both come out about twice the targets. Measured 2026-11-11 with a release build on this Linux/Wayland machine, using the built-in `AMEL_PROBE=1`:
   - cold start: 550–670 ms to the first frame, against under 300 ms
   - memory: about 160 MB resident, against under 80 MB
   - binary: 66.7 MB
@@ -312,7 +312,7 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
 - **M5 done:**
   - WARC 1.1 output (`--warc`, gzip per record, appended to on resume)
   - zip output (`--zip`)
-  - `mistercopy serve`
+  - `amel serve`
   - the offline replay shim (`--replay`): captured JSON/text/XML embedded per host and answered to `fetch` and XHR, even from `file://`
   - Link map SVG export came with M4.
 - **Caveats:**
@@ -332,7 +332,7 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
 - **Design and parallelism pass (2026-11-15):**
   - The crawler numbers its workers and reports them: `Waiting` (holding a URL until the host's slot), `Fetching` and `WorkerIdle`. It also sends `Progress {done, total, active}` from exact counters, so there's no scan per event. Fetches already ran in parallel on the multi-thread runtime; the 1 s per-host gap was what made a single-site copy look serial.
   - The desktop app was redone in an API-client layout: header with command search, icon rail, filterable copies list, request bar (requester chip, address, Copy/Stop, Update), and Options/Rules/Link map tabs. Below is a result panel with a progress bar, time/size/speed, counters, and **Workers** and **Activity** tabs. It has dark and light themes.
-  - Options for workers (1–32), speed presets (Polite/Balanced/Fast) and robots.txt. These, and the theme, persist in `prefs.json`. `mistercopy-gui URL --output DIR --start` launches straight into a copy.
+  - Options for workers (1–32), speed presets (Polite/Balanced/Fast) and robots.txt. These, and the theme, persist in `prefs.json`. `amel-gui URL --output DIR --start` launches straight into a copy.
   - Copy statuses in the sidebar are read when the list changes, no longer from SQLite on every frame.
   - The CLI draws an indicatif progress bar on a terminal; `-j`/`--workers` alias `--concurrency`.
   - Checked: 122 tests pass and clippy is clean. Screenshots of the running app show Polite mode with all four workers in WAIT, and then the finished copy. The CLI bar was checked in a pseudo-terminal.
@@ -346,7 +346,7 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - App parity with the CLI:
     - `mc-cli` is now also a library (options, session, requesters, zip), and the app builds its copies from the same `CrawlOptions`, so `resume` and `update` repeat every choice made in the app.
     - New Limits, Auth and Output tabs, plus "save without following links" in Rules. Form errors are explained before anything starts.
-  - Browser login from the app: Chromium opens at the site, and **Done** saves the cookies into the copy's state folder. Writing the cookie file now creates missing folders, which also fixes `mistercopy login --save` into a new directory.
+  - Browser login from the app: Chromium opens at the site, and **Done** saves the cookies into the copy's state folder. Writing the cookie file now creates missing folders, which also fixes `amel login --save` into a new directory.
   - Checked:
     - 129 tests pass, including a headless UI test that sets max pages and zip output and checks both reach the crawl.
     - Clippy is clean with and without `browser`.
@@ -373,7 +373,7 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
     - When the crawl finishes, every saved file is checked on disk. URLs whose files are gone, or that failed for a passing reason (not a 4xx other than 408/429, not a soft 404, not a size limit), are queued and crawled again.
     - `Verifying` and `Verified` events report it, and the summary carries a `Verification` (files checked, retried, recovered, still missing with reasons).
   - Impersonation:
-    - `mistercopy requesters profiles` lists the about 150 wreq-util profiles by browser. `--profile` and `--platform` are checked before anything is written.
+    - `amel requesters profiles` lists the about 150 wreq-util profiles by browser. `--profile` and `--platform` are checked before anything is written.
     - The app has a Browser tab (browser, version stepper, platform, JavaScript switch), and the requester chip shows the profile in use and opens that tab. The choice is remembered.
   - Checked:
     - Engine tests: a dropped connection recovered while a 404 isn't asked again, and a deleted file restored on the next run.
@@ -401,13 +401,63 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
 
 - **Retrying failures (2026-11-16):**
   - `CrawlConfig::retry_failed` re-queues a stored copy's failed URLs (whatever the reason) when it is continued.
-  - `mistercopy retry DIR` uses it, and so does a **Retry N failed** button in the app's request bar after a copy with failures. Only the failures are fetched; pages are rewritten so recovered files link locally.
+  - `amel retry DIR` uses it, and so does a **Retry N failed** button in the app's request bar after a copy with failures. Only the failures are fetched; pages are rewritten so recovered files link locally.
   - Per-request retries can now be set: `--retry-delay-ms` in the CLI, and **Retries per file** and **Wait before retrying** in the app's Limits tab.
   - Checked:
     - an engine test (only the failures are requested again; the 404 stays failed; the start page links the recovered file)
     - CLI tests against the hostile fixture's `/rate-limited` (recovered on the second `retry`) and a clean copy ("nothing to retry")
     - a UI test that fails a whole copy with a 0 MB file limit, lifts it and retries
   - The UI test also moved the button: in the progress panel's tab row it could be pushed out of view.
+
+- **Smart slow-down (2026-11-16):**
+  - `CrawlConfig::adaptive` (`--adaptive-delay`; a **Smart** checkbox in the app, on by default):
+    - A 429 or 503 doubles a per-host gap (0.5 s to 60 s) and pushes back requests not yet started. Each URL counts once.
+    - After 10 good answers in a row the gap shrinks by a quarter, down to the configured delay.
+    - `Pace` events report each change in the CLI output and the app's Activity log.
+  - The app's Retries and First wait fields moved to Options, next to the checkbox.
+  - Checked:
+    - Engine tests: a single 429 slows to 0.5 s, requests are really spaced, recovery follows; an always-503 page slows its host only once; with the option off the pace never changes.
+    - Live against the hostile fixture: the first version climbed past 12 s because the always-503 pages were retried, which led to the once-per-URL rule. With it the gap peaked at 2 s and recovered.
+    - UI tests for the checkbox and inputs. The narrow-window layout of Options was tightened after a test found the robots switch scrolled out of view.
+
+- **Large files, file types, per-file actions, notifications, scripts, rename (2026-11-16):**
+  - Large files:
+    - Bodies over 4 MiB stream to `.amel/partial/<hash>.part`, with the validator in `.meta`. A dropped connection keeps them, and the next attempt sends `Range` with `If-Range`. A 206 appends, anything else starts over, and a 416 discards the partial file.
+    - Finished large files move into place without being read into memory. `FetchContext` carries a progress callback and the partial folder; `FetchRequest` carries a per-request size cap.
+    - The hostile fixture's `/big.bin` (6 MiB, cut at 3 MiB unless asked for the rest) proves it at the requester and through the CLI.
+  - File types:
+    - `FileType` comes from the MIME type, or is guessed from the extension before a request.
+    - `--skip-types` and `--type-limit TYPE=MiB`, and a Types tab in the app. Skips are new `SkipReason`s (`file-type`, `too-big`); start pages are never skipped.
+  - Per file:
+    - `Downloading` events give each worker row a bar.
+    - Activity rows can open the file, open the page, copy the URL and retry it. `CrawlConfig::retry_urls` refetches a single URL.
+    - Size and Speed count bytes still arriving.
+  - Notifications through notify-rust when a copy ends (Options checkbox).
+  - Scripts:
+    - `Hooks` trait in mc-core (start, should-fetch, file, error, finish, logs).
+    - The new `mc-script` crate implements it with QuickJS (rquickjs 0.14), with a 2 s limit per call and 64 MiB of memory.
+    - `--script FILE`, and a Script tab with an example.
+  - Renamed to Amel Website Copier:
+    - binaries `amel` and `amel-gui`, state folder `.amel`, settings in `~/.config/amel`, robots name `AmelCopier`, reports `amel-report.*`
+    - old folders and `MISTERCOPY_PASSWORD` keep working
+    - crate names (mc-*) are unchanged
+  - Checked:
+    - 168+ tests
+    - In a nested X server: the renamed window, a 20 MB download showing "11.1 MiB / 20.0 MiB" in its worker row, the Types and Script tabs, and row actions on a saved file.
+    - That run found Size and Speed stuck at 0 during a large download; fixed.
+- **Log panel, script editor, scrolling (2026-11-16):**
+  - Log panel:
+    - `CrawlEvent::describe()` in mc-core gives each event a level, a source and a line, shared by the app and the CLI.
+    - The app's panel has level filters, search, follow, copy, open folder and clear. It keeps the last 400 lines on screen and writes a daily file under `~/.config/amel/logs` (pruned after 14 days).
+    - `--log-file FILE` does the same for the CLI.
+  - Script editor:
+    - The Script tab is a gpui-kit code editor.
+    - gpui-kit's tree-sitter JavaScript grammar needs a tree-sitter version that isn't published, so `mc-gui::highlight` is a small hand-written tokenizer. It covers keywords, strings, template strings, regular expressions, comments, numbers, functions, properties and `{ }` folds.
+    - `mc-gui::completion` suggests the hooks as snippets, the fields after `info.`, `file.` and `summary.`, and keywords.
+  - The right column scrolls as a whole with a scrollbar, instead of the tab body being capped at 330 px. The progress panel keeps at least 360 px.
+  - Checked:
+    - 176 tests
+    - In a nested X server: the colors per token kind, the `file.b` → `bytes` completion popup, and the column scrolling with the Script tab open.
 
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.

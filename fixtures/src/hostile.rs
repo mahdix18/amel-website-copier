@@ -81,6 +81,8 @@ pub(crate) fn router() -> Router {
         .route("/huge.bin", get(huge))
         .route("/slow", get(slow))
         .route("/truncated", get(truncated))
+        // Not linked: for resuming large downloads.
+        .route("/big.bin", get(big))
         .route("/empty.html", get(|| async { Html("") }))
         .route("/ok", get(|| async { Html("<p>ok</p>") }))
         .route(
@@ -104,7 +106,7 @@ async fn index() -> Html<String> {
         .map(|href| format!("<li><a href=\"{href}\">{href}</a></li>\n"))
         .collect();
     Html(format!(
-        "<!doctype html><title>MisterCopy fixture: hostile</title>\n<ul>\n{anchors}</ul>\n"
+        "<!doctype html><title>Amel fixture: hostile</title>\n<ul>\n{anchors}</ul>\n"
     ))
 }
 
@@ -198,6 +200,61 @@ async fn huge() -> Response {
 async fn slow() -> Html<&'static str> {
     tokio::time::sleep(Duration::from_secs(5)).await;
     Html("<p>too late</p>")
+}
+
+/// Size of `/big.bin`, and where it breaks off when asked for whole.
+pub const BIG_BYTES: usize = 6 * 1024 * 1024;
+const BIG_BREAK: usize = 3 * 1024 * 1024;
+const BIG_ETAG: &str = "\"big-v1\"";
+
+/// The byte at `index` of `/big.bin`, so a test can check the whole body.
+pub fn big_byte(index: usize) -> u8 {
+    (index % 251) as u8
+}
+
+/// A 6 MiB file that, asked for whole, breaks off halfway; only a `Range`
+/// request with a matching `If-Range` gets the rest (206). So it can only be
+/// downloaded by resuming.
+async fn big(headers: axum::http::HeaderMap) -> Response {
+    let range_start = headers
+        .get(header::RANGE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("bytes="))
+        .and_then(|v| v.strip_suffix('-'))
+        .and_then(|v| v.parse::<usize>().ok());
+    let same = headers.get(header::IF_RANGE).and_then(|v| v.to_str().ok()) == Some(BIG_ETAG);
+    let bytes = |from: usize, to: usize| Bytes::from((from..to).map(big_byte).collect::<Vec<u8>>());
+    match range_start {
+        Some(start) if same && start < BIG_BYTES => (
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+                (header::ETAG, BIG_ETAG.to_owned()),
+                (
+                    header::CONTENT_RANGE,
+                    format!("bytes {start}-{}/{BIG_BYTES}", BIG_BYTES - 1),
+                ),
+                (header::CONTENT_LENGTH, (BIG_BYTES - start).to_string()),
+            ],
+            bytes(start, BIG_BYTES),
+        )
+            .into_response(),
+        _ => {
+            let parts = stream::iter([
+                Ok(bytes(0, BIG_BREAK)),
+                Err(io::Error::other("connection cut halfway")),
+            ]);
+            (
+                [
+                    (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+                    (header::ETAG, BIG_ETAG.to_owned()),
+                    (header::CONTENT_LENGTH, BIG_BYTES.to_string()),
+                ],
+                Body::from_stream(parts),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Starts a body, then drops the connection.

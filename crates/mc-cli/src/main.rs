@@ -8,11 +8,7 @@ use mc_cli::requesters::registry;
 use mc_requester::RequesterInfo;
 
 #[derive(Parser)]
-#[command(
-    name = "mistercopy",
-    version,
-    about = "Copy websites for offline browsing"
-)]
+#[command(name = "amel", version, about = "Copy websites for offline browsing")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -116,7 +112,7 @@ async fn browsers(command: BrowsersCommand) -> ExitCode {
         BrowsersCommand::Status => {
             let found = mc_requester_playwright::installed_chromium();
             if found.is_empty() {
-                println!("No Chromium found. Run `mistercopy browsers install`.");
+                println!("No Chromium found. Run `amel browsers install`.");
             }
             for path in found {
                 println!("{}", path.display());

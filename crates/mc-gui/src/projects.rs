@@ -1,5 +1,5 @@
 //! The copies the app knows about, remembered across launches in
-//! `~/.config/mistercopy/projects.json`.
+//! `~/.config/amel/projects.json`.
 
 use std::path::{Path, PathBuf};
 
@@ -63,12 +63,18 @@ pub struct Projects {
 }
 
 impl Projects {
-    /// `$XDG_CONFIG_HOME/mistercopy/projects.json`, else under `~/.config`.
+    /// `$XDG_CONFIG_HOME/amel/projects.json`, else under `~/.config`.
     pub fn default_path() -> Option<PathBuf> {
         let config = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-        Some(config.join("mistercopy").join("projects.json"))
+        let dir = config.join("amel");
+        // Settings from before the rename move over once.
+        let legacy = config.join("mistercopy");
+        if legacy.is_dir() && !dir.exists() {
+            let _ = std::fs::rename(legacy, &dir);
+        }
+        Some(dir.join("projects.json"))
     }
 
     /// Loads the list; a missing or unreadable file is an empty list, so a

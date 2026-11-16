@@ -13,6 +13,7 @@ use mc_core::{
 };
 use mc_requester::{RequesterRegistry, Url};
 use mc_store::SqliteStore;
+use std::sync::Arc;
 use tokio::sync::broadcast::{self, error::RecvError};
 
 use mc_cli::options::{CrawlOptions, SessionArgs};
@@ -31,7 +32,7 @@ pub struct CopyArgs {
     url: Url,
 
     /// Directory to write into. The copy lands in a subdirectory named
-    /// after the host; progress is kept in `.mistercopy/` for resume and update.
+    /// after the host; progress is kept in `.amel/` for resume and update.
     #[arg(short, long, default_value = ".")]
     output: PathBuf,
 
@@ -48,11 +49,15 @@ pub struct CopyArgs {
     /// Print only the summary and errors.
     #[arg(short, long)]
     quiet: bool,
+
+    /// Also append every event, timestamped, to this log file.
+    #[arg(long, value_name = "FILE")]
+    log_file: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
 pub struct DirArgs {
-    /// The output directory of an earlier `mistercopy copy`.
+    /// The output directory of an earlier `amel copy`.
     #[arg(default_value = ".")]
     dir: PathBuf,
 
@@ -62,6 +67,10 @@ pub struct DirArgs {
     /// Print only the summary and errors.
     #[arg(short, long)]
     quiet: bool,
+
+    /// Also append every event, timestamped, to this log file.
+    #[arg(long, value_name = "FILE")]
+    log_file: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -82,6 +91,10 @@ pub struct ScanArgs {
     /// Print only the summary and errors.
     #[arg(short, long)]
     quiet: bool,
+
+    /// Also append every event, timestamped, to this log file.
+    #[arg(long, value_name = "FILE")]
+    log_file: Option<PathBuf>,
 }
 
 pub async fn copy(args: CopyArgs, registry: &RequesterRegistry) -> ExitCode {
@@ -106,12 +119,12 @@ pub async fn copy(args: CopyArgs, registry: &RequesterRegistry) -> ExitCode {
             match store.status() {
                 Ok(Some(CrawlStatus::Complete)) => {
                     return usage_error(&format!(
-                        "{shown} already holds a finished copy of {seed}. Run `mistercopy update {shown}` to refresh it, or pass --fresh to start over."
+                        "{shown} already holds a finished copy of {seed}. Run `amel update {shown}` to refresh it, or pass --fresh to start over."
                     ));
                 }
                 Ok(Some(_)) => {
                     return usage_error(&format!(
-                        "{shown} holds an unfinished copy of {seed}. Run `mistercopy resume {shown}` to continue it, or pass --fresh to start over."
+                        "{shown} holds an unfinished copy of {seed}. Run `amel resume {shown}` to continue it, or pass --fresh to start over."
                     ));
                 }
                 Ok(None) => {}
@@ -146,6 +159,7 @@ pub async fn copy(args: CopyArgs, registry: &RequesterRegistry) -> ExitCode {
         options: args.options,
         session: args.session,
         quiet: args.quiet,
+        log_file: args.log_file.clone(),
         retry_failed: false,
     };
     run.execute(registry, Some(store)).await
@@ -158,7 +172,7 @@ pub async fn resume(args: DirArgs, registry: &RequesterRegistry) -> ExitCode {
     };
     if let Ok(Some(CrawlStatus::Complete)) = store.status() {
         println!(
-            "{} is already complete. Run `mistercopy update {}` to refresh it.",
+            "{} is already complete. Run `amel update {}` to refresh it.",
             args.dir.display(),
             args.dir.display()
         );
@@ -170,6 +184,7 @@ pub async fn resume(args: DirArgs, registry: &RequesterRegistry) -> ExitCode {
         options,
         session: args.session,
         quiet: args.quiet,
+        log_file: args.log_file.clone(),
         retry_failed: false,
     };
     run.execute(registry, Some(store)).await
@@ -207,6 +222,7 @@ pub async fn retry(args: DirArgs, registry: &RequesterRegistry) -> ExitCode {
         options,
         session: args.session,
         quiet: args.quiet,
+        log_file: args.log_file.clone(),
         retry_failed: true,
     };
     run.execute(registry, Some(store)).await
@@ -220,7 +236,7 @@ pub async fn update(args: DirArgs, registry: &RequesterRegistry) -> ExitCode {
     match store.status() {
         Ok(Some(CrawlStatus::Running | CrawlStatus::Stopped)) => {
             return usage_error(&format!(
-                "{} holds an unfinished copy. Run `mistercopy resume {}` first.",
+                "{} holds an unfinished copy. Run `amel resume {}` first.",
                 args.dir.display(),
                 args.dir.display()
             ));
@@ -237,6 +253,7 @@ pub async fn update(args: DirArgs, registry: &RequesterRegistry) -> ExitCode {
         options,
         session: args.session,
         quiet: args.quiet,
+        log_file: args.log_file.clone(),
         retry_failed: false,
     };
     run.execute(registry, Some(store)).await
@@ -250,6 +267,7 @@ pub async fn scan(args: ScanArgs, registry: &RequesterRegistry) -> ExitCode {
         options: args.options,
         session: args.session,
         quiet: args.quiet,
+        log_file: args.log_file.clone(),
         retry_failed: false,
     };
     let (code, summary) = run.crawl(registry, None, true).await;
@@ -276,7 +294,7 @@ pub async fn scan(args: ScanArgs, registry: &RequesterRegistry) -> ExitCode {
 fn open_existing(dir: &Path) -> Result<(SqliteStore, Url, CrawlOptions), String> {
     if !SqliteStore::exists_in(dir) {
         return Err(format!(
-            "no MisterCopy copy in {} (expected {})",
+            "no Amel copy in {} (expected {})",
             dir.display(),
             SqliteStore::path_in(dir).display()
         ));
@@ -309,6 +327,7 @@ struct Run {
     quiet: bool,
     /// Fetch again the URLs that failed in the stored copy.
     retry_failed: bool,
+    log_file: Option<PathBuf>,
 }
 
 impl Run {
@@ -318,7 +337,7 @@ impl Run {
         let (code, summary) = self.crawl(registry, store, false).await;
         if let Some(summary) = summary {
             if summary.stopped.is_some() {
-                eprintln!("Run `mistercopy resume {}` to continue.", output.display());
+                eprintln!("Run `amel resume {}` to continue.", output.display());
             }
             println!(
                 "Report: {} and {}",
@@ -373,16 +392,37 @@ impl Run {
         }
 
         let mut crawler = Crawler::new(config, requester);
+        if let Some(path) = &self.options.script {
+            match mc_script::ScriptHooks::from_file(path) {
+                Ok(hooks) => crawler = crawler.with_hooks(Arc::new(hooks)),
+                Err(message) => return (usage_error(&message), None),
+            }
+        }
         if let Some(store) = store {
             crawler = crawler.with_store(store);
         }
         let interrupts = tokio::spawn(handle_interrupts(crawler.stop_handle()));
         let printer = (!self.quiet).then(|| tokio::spawn(print_events(crawler.subscribe())));
+        let logger = match &self.log_file {
+            Some(path) => match open_log(path) {
+                Ok(file) => Some(tokio::spawn(log_events(crawler.subscribe(), file))),
+                Err(error) => {
+                    return (
+                        usage_error(&format!("cannot open log {}: {error}", path.display())),
+                        None,
+                    );
+                }
+            },
+            None => None,
+        };
         let result = crawler.run().await;
         interrupts.abort();
         if let Some(printer) = printer {
             // Ends once the crawler, and with it the event sender, is gone.
             let _ = printer.await;
+        }
+        if let Some(logger) = logger {
+            let _ = logger.await;
         }
 
         match result {
@@ -416,6 +456,43 @@ async fn handle_interrupts(stop: StopHandle) {
 
 /// Prints each result as a line. On a terminal a progress bar stays at the
 /// bottom: files done out of found, bytes, speed and busy workers.
+fn open_log(path: &Path) -> std::io::Result<std::fs::File> {
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+}
+
+/// Appends every event worth a line to the log file, with a local time,
+/// in the same words as the app's log panel.
+async fn log_events(mut events: broadcast::Receiver<CrawlEvent>, file: std::fs::File) {
+    use std::io::Write as _;
+    let mut out = std::io::BufWriter::new(file);
+    loop {
+        match events.recv().await {
+            Ok(event) => {
+                if let Some((level, source, message)) = event.describe() {
+                    let _ = writeln!(
+                        out,
+                        "{} {:<5} {:<7} {message}",
+                        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                        level.as_str(),
+                        source
+                    );
+                }
+            }
+            Err(RecvError::Lagged(missed)) => {
+                let _ = writeln!(out, "({missed} events dropped)");
+            }
+            Err(RecvError::Closed) => break,
+        }
+    }
+    let _ = out.flush();
+}
+
 async fn print_events(mut events: broadcast::Receiver<CrawlEvent>) {
     let bar = std::io::stderr().is_terminal().then(progress_bar);
     let started = Instant::now();
@@ -457,6 +534,20 @@ async fn print_events(mut events: broadcast::Receiver<CrawlEvent>) {
             ),
             Ok(CrawlEvent::Stopping { reason }) => say(format!("stopping: {reason}"), true),
             Ok(CrawlEvent::Paused) => say("paused".to_owned(), true),
+            Ok(CrawlEvent::ScriptLog { message }) => say(format!("script: {message}"), false),
+            Ok(CrawlEvent::Downloading { .. }) => {}
+            Ok(CrawlEvent::Pace { host, gap, slower }) => say(
+                format!(
+                    "{} {host}: {:.1}s between requests",
+                    if slower {
+                        "slowing down"
+                    } else {
+                        "speeding up"
+                    },
+                    gap.as_secs_f64()
+                ),
+                slower,
+            ),
             Ok(CrawlEvent::Resumed) => say("resumed".to_owned(), true),
             Ok(CrawlEvent::Verifying { files, retrying }) => say(
                 format!("checking {files} saved files; fetching {retrying} missed URLs again"),

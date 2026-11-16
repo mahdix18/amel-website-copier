@@ -1,7 +1,7 @@
-# The mistercopy command-line tool, without the desktop app or browser.
+# The amel command-line tool, without the desktop app or browser.
 #
-#   docker build -t mistercopy .
-#   docker run --rm -v "$PWD/copies:/copies" mistercopy copy https://example.com -o /copies
+#   docker build -t amel .
+#   docker run --rm -v "$PWD/copies:/copies" amel copy https://example.com -o /copies
 
 FROM rust:1.99.1-bookworm AS build
 # wreq builds BoringSSL, which needs cmake and libclang.
@@ -16,7 +16,7 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=build /src/target/release/mistercopy /usr/local/bin/mistercopy
+COPY --from=build /src/target/release/amel /usr/local/bin/amel
 WORKDIR /copies
-ENTRYPOINT ["mistercopy"]
+ENTRYPOINT ["amel"]
 CMD ["--help"]

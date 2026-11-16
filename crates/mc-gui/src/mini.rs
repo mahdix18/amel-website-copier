@@ -52,7 +52,7 @@ impl MiniWindow {
             kind: WindowKind::PopUp,
             is_resizable: false,
             window_decorations: Some(WindowDecorations::Client),
-            app_id: Some("mistercopy".into()),
+            app_id: Some("amel".into()),
             ..WindowOptions::default()
         };
         let main = main.clone();
@@ -132,7 +132,7 @@ impl Render for MiniWindow {
             "{} / {} · {} · {}/s",
             progress.done,
             progress.total.max(progress.done),
-            human_bytes(progress.bytes),
+            human_bytes(progress.live_bytes()),
             human_bytes(progress.rate())
         );
         let running = progress.running();

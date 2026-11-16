@@ -1,6 +1,6 @@
 [package]
 name = "mc-cli"
-description = "The `mistercopy` command-line tool"
+description = "The `amel` command-line tool"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ name = "mc_cli"
 path = "src/lib.rs"
 
 [[bin]]
-name = "mistercopy"
+name = "amel"
 path = "src/main.rs"
 
 [features]
@@ -22,11 +22,13 @@ browser = ["dep:mc-requester-playwright"]
 [dependencies]
 axum.workspace = true
 clap.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 indicatif.workspace = true
 mc-core.workspace = true
 mc-requester.workspace = true
 mc-requester-playwright = { workspace = true, optional = true }
 mc-requester-wreq.workspace = true
+mc-script.workspace = true
 mc-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -4,7 +4,7 @@ use gpui_kit::{
 };
 use mc_gui::CopyWindow;
 
-const USAGE: &str = "usage: mistercopy-gui [URL] [--output DIR] [--start] [--mini]";
+const USAGE: &str = "usage: amel-gui [URL] [--output DIR] [--start] [--mini]";
 
 /// What the command line asks the window to do.
 #[derive(Default)]
@@ -29,7 +29,7 @@ fn launch() -> Launch {
                 std::process::exit(0);
             }
             "--version" | "-V" => {
-                println!("mistercopy-gui {}", env!("CARGO_PKG_VERSION"));
+                println!("amel-gui {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             _ if arg.starts_with('-') => {
@@ -58,12 +58,12 @@ fn main() {
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
-                    title: Some("MisterCopy".into()),
+                    title: Some("Amel Website Copier".into()),
                     ..TitleBar::title_bar_options()
                 }),
                 window_decorations: Some(WindowDecorations::Client),
                 window_min_size: Some(size(px(860.), px(600.))),
-                app_id: Some("mistercopy".into()),
+                app_id: Some("amel".into()),
                 ..TitleBar::window_options()
             };
             let mini = launch.mini;
@@ -74,7 +74,7 @@ fn main() {
                     view
                 })
             })
-            .expect("failed to open the MisterCopy window");
+            .expect("failed to open the Amel window");
             if mini {
                 let _ = handle.update(cx, |_, window, cx| {
                     view.update(cx, |view, cx| view.show_mini(window, cx));

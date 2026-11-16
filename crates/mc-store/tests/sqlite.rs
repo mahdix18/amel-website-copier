@@ -124,5 +124,23 @@ fn refuses_an_incompatible_schema() {
         .set_meta("schema", "999")
         .unwrap();
     let err = SqliteStore::open(dir.path()).err().unwrap();
-    assert!(err.to_string().contains("incompatible MisterCopy"), "{err}");
+    assert!(err.to_string().contains("incompatible Amel"), "{err}");
+}
+
+#[test]
+fn copies_from_before_the_rename_move_their_state() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut store = SqliteStore::open(dir.path()).unwrap();
+        mc_core::StateStore::set_status(&mut store, mc_core::CrawlStatus::Stopped).unwrap();
+    }
+    // As a copy made before the rename would have it.
+    std::fs::rename(dir.path().join(".amel"), dir.path().join(".mistercopy")).unwrap();
+    assert!(
+        SqliteStore::exists_in(dir.path()),
+        "found under the old name"
+    );
+    assert!(dir.path().join(".amel").is_dir() && !dir.path().join(".mistercopy").exists());
+    let store = SqliteStore::open(dir.path()).unwrap();
+    assert_eq!(store.status().unwrap(), Some(mc_core::CrawlStatus::Stopped));
 }

@@ -79,7 +79,7 @@ impl Report {
         entries.sort_by(|a, b| a.url.cmp(&b.url));
 
         let mut report = Report {
-            generator: format!("MisterCopy {}", env!("CARGO_PKG_VERSION")),
+            generator: format!("Amel {}", env!("CARGO_PKG_VERSION")),
             seeds,
             status,
             elapsed_secs,
@@ -146,7 +146,7 @@ impl Report {
             html,
             r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MisterCopy report</title>
+<title>Amel report</title>
 <style>
 :root {{ color-scheme: light dark; --fg:#1f2328; --muted:#59636e; --bg:#fff; --line:#d1d9e0; --bad:#cf222e; }}
 @media (prefers-color-scheme: dark) {{ :root {{ --fg:#e6edf3; --muted:#9198a1; --bg:#0d1117; --line:#3d444d; --bad:#ff7b72; }} }}
@@ -159,7 +159,7 @@ table {{ border-collapse: collapse; width: 100%; margin-bottom: 2rem; }}
 th, td {{ text-align: left; padding: .35rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }}
 th {{ color: var(--muted); font-weight: 600; }} td.num {{ text-align: right; white-space: nowrap; }}
 </style></head><body>
-<h1>MisterCopy report</h1>
+<h1>Amel report</h1>
 <p class="muted">{generator} · {seeds} · {status} · {elapsed:.1}s</p>
 <div class="stats">
 <div class="stat"><b>{saved}</b>saved</div><div class="stat"><b>{size}</b>total size</div>

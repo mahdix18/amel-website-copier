@@ -21,6 +21,17 @@ pub struct Prefs {
     pub sitemaps: bool,
     /// Check for missed files after each copy.
     pub verify: bool,
+    /// Slow down automatically on 429/503.
+    pub adaptive: bool,
+    /// File types not downloaded.
+    pub skip_types: Vec<mc_core::FileType>,
+    /// Run the script with each copy, and its text.
+    pub script_on: bool,
+    pub script: Option<String>,
+    /// A desktop notification when a copy finishes.
+    pub notify: bool,
+    /// The log panel is open.
+    pub console_open: bool,
     pub dark: bool,
 }
 
@@ -35,6 +46,12 @@ impl Default for Prefs {
             platform: None,
             sitemaps: true,
             verify: true,
+            adaptive: true,
+            skip_types: Vec::new(),
+            script_on: false,
+            script: None,
+            notify: true,
+            console_open: false,
             dark: true,
         }
     }

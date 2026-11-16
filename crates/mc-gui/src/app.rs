@@ -8,7 +8,10 @@ use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    Editor, EditorState, Input, InputEvent, InputState, Textarea, TextareaState,
+};
+use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{Disableable, Icon, IconName, Selectable, Sizable, TitleBar};
 use gpui_kit::prelude::*;
@@ -17,11 +20,12 @@ use gpui_kit::{
     KeyBinding, KeyDownEvent, Role, SharedString, TestSupportExt, Window, actions, div, px,
     relative,
 };
-use mc_core::{StopHandle, human_bytes};
+use mc_core::{FileType, StopHandle, human_bytes};
 use mc_requester::ProxyRotation;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::oneshot;
 
+use crate::console::{self, Console};
 use crate::insight::{self, MapLine};
 use crate::job::{self, LineKind, MAX_WORKERS, Progress, Settings, Speed};
 use crate::look::Look;
@@ -39,15 +43,25 @@ const ACTIVITY_ROWS: usize = 250;
 /// How often the clock and speed refresh while copying.
 const TICK: Duration = Duration::from_millis(500);
 /// Written next to the report by "Export link map as SVG".
-pub const LINK_MAP_SVG: &str = "mistercopy-linkmap.svg";
+pub const LINK_MAP_SVG: &str = "amel-linkmap.svg";
 
-actions!(mistercopy, [TogglePalette]);
+actions!(amel, [TogglePalette, ToggleConsole]);
+
+/// The log panel's height, and the lines it draws at most.
+/// The progress panel's smallest height.
+const RESULT_MIN_HEIGHT: f32 = 360.;
+/// The script editor's height.
+const SCRIPT_HEIGHT: f32 = 320.;
+const CONSOLE_HEIGHT: f32 = 230.;
+const CONSOLE_ROWS: usize = 400;
 
 /// Keyboard shortcuts; call once when the app starts.
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-k", TogglePalette, None),
         KeyBinding::new("cmd-k", TogglePalette, None),
+        KeyBinding::new("ctrl-`", ToggleConsole, None),
+        KeyBinding::new("cmd-`", ToggleConsole, None),
     ]);
 }
 
@@ -61,6 +75,10 @@ pub enum Tab {
     /// Depth, size, time and bandwidth limits; sitemaps and aliases.
     Limits,
     Rules,
+    /// File types to download, and size limits per type.
+    Types,
+    /// A JavaScript run with the copy.
+    Script,
     /// Credentials, headers, cookies and browser login.
     Auth,
     /// Proxy list, rotation, bypass and the system proxy.
@@ -88,6 +106,9 @@ struct Fields {
     no_proxy: Entity<InputState>,
     retries: Entity<InputState>,
     retry_delay: Entity<InputState>,
+    /// Size limit in MB per file type.
+    type_limits: Vec<(FileType, Entity<InputState>)>,
+    script: Entity<EditorState>,
 }
 
 /// The tabs of the result panel.
@@ -119,6 +140,10 @@ pub struct CopyWindow {
     external_assets: bool,
     sitemaps: bool,
     verify: bool,
+    adaptive: bool,
+    skip_types: Vec<FileType>,
+    script_on: bool,
+    notify: bool,
     warc: bool,
     zip: bool,
     replay: bool,
@@ -145,9 +170,16 @@ pub struct CopyWindow {
     focus: FocusHandle,
     palette_open: bool,
     palette_query: Entity<InputState>,
-    /// Set once the startup probe (MISTERCOPY_PROBE) has been armed.
+    /// Set once the startup probe (AMEL_PROBE) has been armed.
     probed: bool,
     prefs_path: Option<PathBuf>,
+    /// The log panel and what it shows.
+    console: Console,
+    console_open: bool,
+    console_filter: console::Filter,
+    console_query: Entity<InputState>,
+    console_follow: bool,
+    console_scroll: gpui_kit::ScrollHandle,
     /// The mini window, while it is open.
     mini: Option<AnyWindowHandle>,
     mini_opening: bool,
@@ -198,10 +230,8 @@ impl CopyWindow {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let statuses = projects.items.iter().map(Project::status).collect();
-        let prefs_path = projects
-            .path()
-            .and_then(|p| p.parent())
-            .map(|dir| dir.join("prefs.json"));
+        let projects_dir = projects.path().and_then(|p| p.parent()).map(PathBuf::from);
+        let prefs_path = projects_dir.as_ref().map(|dir| dir.join("prefs.json"));
         let prefs = Prefs::load(prefs_path.as_ref());
         if prefs.dark != Look::global(cx).dark {
             let look = if prefs.dark {
@@ -244,6 +274,26 @@ impl CopyWindow {
                 window,
                 cx,
             ),
+            type_limits: FileType::ALL
+                .into_iter()
+                .filter(|kind| *kind != FileType::Page)
+                .map(|kind| (kind, input("no limit", window, cx)))
+                .collect(),
+            script: cx.new(|cx| {
+                let mut editor = EditorState::new(window, cx)
+                    .language("javascript")
+                    .line_number(true)
+                    .default_value(
+                        prefs
+                            .script
+                            .clone()
+                            .unwrap_or_else(|| mc_script::TEMPLATE.to_owned()),
+                    );
+                editor.set_highlighter_factory(crate::highlight::factory(), cx);
+                editor.lsp_mut().completion_provider =
+                    Some(std::rc::Rc::new(crate::completion::ScriptCompletion));
+                editor
+            }),
             retries: cx
                 .new(|cx| InputState::new(window, cx).default_value(defaults.retries.clone())),
             retry_delay: cx.new(|cx| {
@@ -268,6 +318,10 @@ impl CopyWindow {
             external_assets: false,
             sitemaps: prefs.sitemaps,
             verify: prefs.verify,
+            adaptive: prefs.adaptive,
+            skip_types: prefs.skip_types.clone(),
+            script_on: prefs.script_on,
+            notify: prefs.notify,
             warc: false,
             zip: false,
             replay: false,
@@ -293,6 +347,12 @@ impl CopyWindow {
             palette_query,
             probed: false,
             prefs_path,
+            console: Console::new(projects_dir.as_ref().map(|dir| dir.join("logs"))),
+            console_open: prefs.console_open,
+            console_filter: console::Filter::default(),
+            console_query: input("Search the log", window, cx),
+            console_follow: true,
+            console_scroll: gpui_kit::ScrollHandle::new(),
             mini: None,
             mini_opening: false,
             minimize_for_mini: true,
@@ -310,13 +370,19 @@ impl CopyWindow {
             platform: self.platform.clone(),
             sitemaps: self.sitemaps,
             verify: self.verify,
+            adaptive: self.adaptive,
+            skip_types: self.skip_types.clone(),
+            script_on: self.script_on,
+            script: Some(self.fields.script.read(cx).value().to_string()),
+            notify: self.notify,
+            console_open: self.console_open,
             dark: Look::global(cx).dark,
         };
         let _ = prefs.save(self.prefs_path.as_ref());
         cx.notify();
     }
 
-    /// Fills the form from the command line (`mistercopy-gui URL
+    /// Fills the form from the command line (`amel-gui URL
     /// [--output DIR] [--start]`), optionally starting the copy at once.
     pub fn prefill(
         &mut self,
@@ -387,6 +453,7 @@ impl CopyWindow {
             Command::Stop => self.stop(cx),
             Command::Pause => self.toggle_pause(cx),
             Command::Mini => self.show_mini(window, cx),
+            Command::Console => self.toggle_console(cx),
             Command::Show(tab) => self.show(tab, cx),
             Command::ExportMap => {
                 self.tab = Tab::LinkMap;
@@ -489,6 +556,16 @@ impl CopyWindow {
             retry_failed: false,
             retries: text(&f.retries),
             retry_delay_secs: text(&f.retry_delay),
+            adaptive: self.adaptive,
+            skip_types: self.skip_types.clone(),
+            type_limits: f
+                .type_limits
+                .iter()
+                .map(|(kind, input)| (*kind, text(input)))
+                .collect(),
+            script_on: self.script_on,
+            script: f.script.read(cx).value().to_string(),
+            retry_urls: Vec::new(),
         }
     }
 
@@ -515,7 +592,7 @@ impl CopyWindow {
         self.login_note = "Log in in the Chromium window, then press Done here.".to_owned();
         let target = save_to.clone();
         let started = std::thread::Builder::new()
-            .name("mistercopy-login".to_owned())
+            .name("amel-login".to_owned())
             .spawn(move || {
                 let result = tokio::runtime::Builder::new_current_thread()
                     .enable_all()
@@ -587,6 +664,16 @@ impl CopyWindow {
         }
     }
 
+    /// Fetches one URL of the copy again; other failures stay as they are.
+    pub fn retry_url(&mut self, url: String, cx: &mut Context<Self>) {
+        let mut settings = self.settings(false, cx);
+        settings.retry_urls = vec![url.clone()];
+        self.start_with(settings, cx);
+        if self.progress.running() {
+            self.progress.note(&format!("Fetching {url} again."));
+        }
+    }
+
     fn start_with(&mut self, settings: Settings, cx: &mut Context<Self>) {
         if self.progress.running() {
             return;
@@ -594,6 +681,11 @@ impl CopyWindow {
         let running = match job::start(&settings) {
             Ok(running) => running,
             Err(message) => {
+                self.console.push(
+                    console::Level::Error,
+                    "app",
+                    format!("could not start: {message}"),
+                );
                 self.progress = Progress::failed(message);
                 cx.notify();
                 return;
@@ -623,6 +715,7 @@ impl CopyWindow {
                     Ok(event) => {
                         let applied = this.update(cx, |this, cx| {
                             this.progress.apply(&event);
+                            this.console.event(&event);
                             cx.notify();
                         });
                         if applied.is_err() {
@@ -639,6 +732,16 @@ impl CopyWindow {
             });
             let _ = this.update(cx, |this, cx| {
                 this.progress.finish(outcome.result, &output);
+                let level = match &this.progress.phase {
+                    job::Phase::Failed(_) => console::Level::Error,
+                    _ if this.progress.failed > 0 => console::Level::Warn,
+                    _ => console::Level::Info,
+                };
+                this.console.push(level, "app", this.progress.status());
+                this.console.flush();
+                if this.notify {
+                    notify_finished(&this.progress);
+                }
                 if let Some(zip) = outcome.zip {
                     this.progress.zipped(zip);
                 }
@@ -655,6 +758,7 @@ impl CopyWindow {
             loop {
                 cx.background_executor().timer(TICK).await;
                 let running = this.update(cx, |this, cx| {
+                    this.console.flush();
                     cx.notify();
                     this.progress.running()
                 });
@@ -853,13 +957,13 @@ impl CopyWindow {
                             .text_color(look.on_accent)
                             .text_sm()
                             .font_weight(FontWeight::BOLD)
-                            .child("M"),
+                            .child("A"),
                     )
                     .child(
                         div()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
-                            .child("MisterCopy"),
+                            .child("Amel Website Copier"),
                     )
                     .child(chip(
                         concat!("v", env!("CARGO_PKG_VERSION")),
@@ -941,6 +1045,22 @@ impl CopyWindow {
                 self.tab == Tab::Rules,
                 cx,
                 |this, cx| this.show(Tab::Rules, cx),
+            ))
+            .child(item(
+                "rail-types",
+                IconName::File,
+                "File types",
+                self.tab == Tab::Types,
+                cx,
+                |this, cx| this.show(Tab::Types, cx),
+            ))
+            .child(item(
+                "rail-script",
+                IconName::SquareTerminal,
+                "Script",
+                self.tab == Tab::Script,
+                cx,
+                |this, cx| this.show(Tab::Script, cx),
             ))
             .child(item(
                 "rail-auth",
@@ -1206,6 +1326,35 @@ impl CopyWindow {
                     })
                     .child(
                         div()
+                            .id("console-toggle")
+                            .test_support()
+                            .aria_label("Log")
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .hover(|el| el.text_color(look.text))
+                            .when(self.console_open, |el| el.text_color(look.text))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_console(cx)))
+                            .child(Icon::new(IconName::SquareTerminal).xsmall())
+                            .child("Log")
+                            .when(self.console.errors > 0, |el| {
+                                el.child(chip(
+                                    format!("{}", self.console.errors),
+                                    look.danger,
+                                    look.danger.opacity(0.15),
+                                ))
+                            })
+                            .when(self.console.warnings > 0, |el| {
+                                el.child(chip(
+                                    format!("{}", self.console.warnings),
+                                    look.warning,
+                                    look.warning.opacity(0.15),
+                                ))
+                            }),
+                    )
+                    .child(
+                        div()
                             .id("status-folder")
                             .cursor_pointer()
                             .hover(|el| el.text_color(look.text))
@@ -1364,6 +1513,11 @@ impl CopyWindow {
             .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
             .count()
             + usize::from(self.system_proxy);
+        let types = self.skip_types.len()
+            + f.type_limits
+                .iter()
+                .filter(|(_, input)| !Self::text(input, cx).trim().is_empty())
+                .count();
         let auth = filled(&[&f.auth_user, &f.cookies])
             + usize::from(!f.headers.read(cx).value().trim().is_empty());
         let output = [self.warc, self.zip, self.replay && self.render_js]
@@ -1380,17 +1534,27 @@ impl CopyWindow {
                 cx.listener(move |this, _, _, cx| this.show(which, cx)),
             )
         };
+        // Wraps onto a second line when the window is too narrow for all.
         div()
             .flex()
-            .gap_4()
+            .flex_wrap()
+            .gap_x_4()
+            .gap_y_1()
             .border_b_1()
             .border_color(look.border)
             .child(tab("tab-copy", "Options", Tab::Copy, 0))
             .child(tab("tab-browser", "Browser", Tab::Browser, 0))
             .child(tab("tab-limits", "Limits", Tab::Limits, limits))
+            .child(tab("tab-types", "Types", Tab::Types, types))
             .child(tab("tab-rules", "Rules", Tab::Rules, rules))
             .child(tab("tab-auth", "Auth", Tab::Auth, auth))
             .child(tab("tab-proxy", "Proxy", Tab::Proxy, proxy))
+            .child(tab(
+                "tab-script",
+                "Script",
+                Tab::Script,
+                usize::from(self.script_on),
+            ))
             .child(tab("tab-output", "Output", Tab::Output, output))
             .child(tab("tab-map", "Link map", Tab::LinkMap, 0))
             .into_any_element()
@@ -1475,7 +1639,7 @@ impl CopyWindow {
         div()
             .flex()
             .flex_col()
-            .gap_4()
+            .gap_3()
             .child(labelled(
                 "Save in",
                 None,
@@ -1509,7 +1673,27 @@ impl CopyWindow {
                         stepper,
                         look,
                     ))
-                    .child(labelled("Speed", Some(self.speed.hint()), speeds, look)),
+                    .child(labelled("Speed", Some(self.speed.hint()), speeds, look))
+                    .child(labelled(
+                        "Retries",
+                        None,
+                        div().w(px(64.)).child(
+                            Input::new(&self.fields.retries)
+                                .id("retries")
+                                .aria_label("Retries per file"),
+                        ),
+                        look,
+                    ))
+                    .child(labelled(
+                        "First wait (s)",
+                        None,
+                        div().w(px(64.)).child(
+                            Input::new(&self.fields.retry_delay)
+                                .id("retry-delay")
+                                .aria_label("Wait before retrying"),
+                        ),
+                        look,
+                    )),
             )
             .child(
                 div().flex().flex_wrap().gap_6().child(
@@ -1528,6 +1712,24 @@ impl CopyWindow {
                     .label("Check for missed files after downloading, and fetch them again")
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.verify = *checked;
+                        this.changed(cx);
+                    })),
+            )
+            .child(
+                Checkbox::new("notify")
+                    .checked(self.notify)
+                    .label("Notify me when a copy finishes")
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.notify = *checked;
+                        this.changed(cx);
+                    })),
+            )
+            .child(
+                Checkbox::new("adaptive")
+                    .checked(self.adaptive)
+                    .label("Smart: slow down when the site says it's busy (429/503), speed up again when it keeps up")
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.adaptive = *checked;
                         this.changed(cx);
                     })),
             )
@@ -1568,12 +1770,6 @@ impl CopyWindow {
                 div()
                     .flex()
                     .gap_3()
-                    .child(cell("Retries per file", &f.retries, "retries"))
-                    .child(cell(
-                        "Wait before retrying (s)",
-                        &f.retry_delay,
-                        "retry-delay",
-                    ))
                     .child(div().flex_1().min_w(px(150.)).child(labelled(
                         "Same site under other names",
                         None,
@@ -1632,7 +1828,7 @@ impl CopyWindow {
             div()
                 .text_xs()
                 .text_color(look.muted)
-                .child("Browser login needs a build with --features browser; `mistercopy login` saves a cookies file.")
+                .child("Browser login needs a build with --features browser; `amel login` saves a cookies file.")
                 .into_any_element()
         };
         div()
@@ -1716,6 +1912,20 @@ impl CopyWindow {
             let checks = receive.await.unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
                 this.proxy_checking = false;
+                for check in &checks {
+                    match &check.result {
+                        Ok((status, took)) => this.console.push(
+                            console::Level::Info,
+                            "proxy",
+                            format!("{}: HTTP {status} in {} ms", check.proxy, took.as_millis()),
+                        ),
+                        Err(error) => this.console.push(
+                            console::Level::Error,
+                            "proxy",
+                            format!("{}: {error}", check.proxy),
+                        ),
+                    }
+                }
                 this.proxy_checks = Some(Ok(checks));
                 cx.notify();
             });
@@ -1964,6 +2174,390 @@ impl CopyWindow {
                     cx,
                 ))
             })
+            .into_any_element()
+    }
+
+    /// Small buttons at the end of an activity row: open the file, open
+    /// the page, copy the address, fetch it again.
+    fn row_actions(
+        &self,
+        index: usize,
+        line: &job::LogLine,
+        running: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let button = |id: String, icon: IconName, tip: &'static str| {
+            Button::new(SharedString::from(id))
+                .ghost()
+                .xsmall()
+                .icon(icon)
+                .tooltip(tip)
+        };
+        let mut row = div().flex().flex_none().gap(px(2.));
+        if let Some(path) = line.path.clone() {
+            row = row.child(
+                button(
+                    format!("act-open-{index}"),
+                    IconName::FileText,
+                    "Open the file",
+                )
+                .on_click(move |_, _, cx| cx.open_url(&format!("file://{}", path.display()))),
+            );
+        }
+        if let Some(url) = line.url.clone() {
+            let page = url.clone();
+            let copied = url.clone();
+            row = row
+                .child(
+                    button(
+                        format!("act-page-{index}"),
+                        IconName::ExternalLink,
+                        "Open in the browser",
+                    )
+                    .on_click(move |_, _, cx| cx.open_url(&page)),
+                )
+                .child(
+                    button(
+                        format!("act-copy-{index}"),
+                        IconName::Copy,
+                        "Copy the address",
+                    )
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(copied.clone()))
+                    }),
+                );
+            if !running
+                && matches!(
+                    line.kind,
+                    LineKind::Failed | LineKind::Skipped | LineKind::Retry
+                )
+            {
+                row = row.child(
+                    button(
+                        format!("act-retry-{index}"),
+                        IconName::RefreshCw,
+                        "Fetch this again",
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.retry_url(url.clone(), cx))),
+                );
+            }
+        }
+        row.into_any_element()
+    }
+
+    fn types_view(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let cells: Vec<AnyElement> = self
+            .fields
+            .type_limits
+            .iter()
+            .map(|(kind, input)| {
+                let kind = *kind;
+                let on = !self.skip_types.contains(&kind);
+                div()
+                    .w(px(250.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .child(
+                        Checkbox::new(SharedString::from(format!("type-{}", kind.as_str())))
+                            .checked(on)
+                            .label(capitalize(&kind.to_string()))
+                            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                                this.skip_types.retain(|k| *k != kind);
+                                if !*checked {
+                                    this.skip_types.push(kind);
+                                }
+                                this.changed(cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div().w(px(70.)).child(
+                                    Input::new(input)
+                                        .small()
+                                        .id(SharedString::from(format!("limit-{}", kind.as_str())))
+                                        .aria_label("Size limit in MB"),
+                                ),
+                            )
+                            .child(div().text_xs().text_color(look.muted).child("MB")),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(div().text_xs().text_color(look.muted).child(
+                "Untick a type to leave it out; a size sets the largest file of that type to keep (empty: no limit). Pages are always copied.",
+            ))
+            .child(div().flex().flex_wrap().gap_x_6().gap_y_2().children(cells))
+            .into_any_element()
+    }
+
+    fn script_view(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        Switch::new("script-on")
+                            .checked(self.script_on)
+                            .label("Run this script with each copy")
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.script_on = *checked;
+                                this.changed(cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("script-reset")
+                            .ghost()
+                            .small()
+                            .label("Reset to the example")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.fields.script.update(cx, |input, cx| {
+                                    input.set_value(mc_script::TEMPLATE.to_owned(), window, cx)
+                                });
+                                this.changed(cx);
+                            })),
+                    ),
+            )
+            .child(div().text_xs().text_color(look.muted).child(
+                "JavaScript (QuickJS). Define onStart(info), shouldFetch(url, kind) (return false to skip), onFile(file), onError(url, reason), onFinish(summary); log(text) writes to Activity. Each call may run 2 s.",
+            ))
+            .child(
+                Editor::new(&self.fields.script)
+                    .h(px(SCRIPT_HEIGHT))
+                    .aria_label("Script"),
+            )
+            .into_any_element()
+    }
+
+    /// Shows or hides the log panel.
+    pub fn toggle_console(&mut self, cx: &mut Context<Self>) {
+        self.console_open = !self.console_open;
+        self.changed(cx);
+    }
+
+    pub fn console(&self) -> &Console {
+        &self.console
+    }
+
+    fn console_panel(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let query = Self::text(&self.console_query, cx);
+        let matching: Vec<&console::Entry> =
+            self.console.matching(self.console_filter, &query).collect();
+        let shown = matching.len().min(CONSOLE_ROWS);
+        let rows = matching[matching.len() - shown..].iter().map(|entry| {
+            let color = match entry.level {
+                console::Level::Debug => look.muted,
+                console::Level::Info => look.info,
+                console::Level::Warn => look.warning,
+                console::Level::Error => look.danger,
+            };
+            div()
+                .flex()
+                .gap_2()
+                .px_2()
+                .text_xs()
+                .font_family("monospace")
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(look.muted)
+                        .child(entry.clock()),
+                )
+                .child(
+                    div()
+                        .w(px(44.))
+                        .flex_none()
+                        .text_color(color)
+                        .font_weight(FontWeight::BOLD)
+                        .child(entry.level.as_str()),
+                )
+                .child(
+                    div()
+                        .w(px(48.))
+                        .flex_none()
+                        .text_color(look.muted)
+                        .child(entry.source),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_color(if entry.level >= console::Level::Warn {
+                            color
+                        } else {
+                            look.text
+                        })
+                        .child(entry.message.clone()),
+                )
+        });
+        if self.console_follow {
+            self.console_scroll.scroll_to_bottom();
+        }
+        let filters = div()
+            .flex()
+            .p(px(2.))
+            .rounded_md()
+            .bg(look.raised)
+            .border_1()
+            .border_color(look.border)
+            .children(console::Filter::ALL.map(|filter| {
+                let active = self.console_filter == filter;
+                div()
+                    .id(SharedString::from(format!(
+                        "log-filter-{}",
+                        filter.label().to_lowercase()
+                    )))
+                    .test_support()
+                    .aria_label(filter.label())
+                    .px_2()
+                    .rounded(px(4.))
+                    .text_xs()
+                    .cursor_pointer()
+                    .when(active, |el| el.bg(look.surface).text_color(look.text))
+                    .when(!active, |el| el.text_color(look.muted))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.console_filter = filter;
+                        cx.notify();
+                    }))
+                    .child(filter.label())
+            }));
+        let total = matching.len();
+        div()
+            .id("console")
+            .test_support()
+            .h(px(CONSOLE_HEIGHT))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .bg(look.chrome)
+            .border_t_1()
+            .border_color(look.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_3()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(look.border)
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Log"),
+                    )
+                    .child(
+                        div()
+                            .id("log-count")
+                            .test_support()
+                            .aria_label(SharedString::from(format!("{total} lines")))
+                            .text_xs()
+                            .text_color(look.muted)
+                            .child(format!("{total} lines")),
+                    )
+                    .child(filters)
+                    .child(
+                        div().w(px(200.)).child(
+                            Input::new(&self.console_query)
+                                .small()
+                                .id("log-search")
+                                .aria_label("Search the log"),
+                        ),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Checkbox::new("log-follow")
+                            .checked(self.console_follow)
+                            .label("Follow")
+                            .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                                this.console_follow = *checked;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("log-copy")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Copy)
+                            .tooltip("Copy the lines shown")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let query = Self::text(&this.console_query, cx);
+                                let text = this.console.text(this.console_filter, &query);
+                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+                            })),
+                    )
+                    .child(
+                        Button::new("log-folder")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::FolderOpen)
+                            .tooltip("Open the folder of daily log files")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(dir) = this.console.dir() {
+                                    let _ = std::fs::create_dir_all(dir);
+                                    cx.open_url(&format!("file://{}", dir.display()));
+                                }
+                            })),
+                    )
+                    .child(
+                        Button::new("log-clear")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Delete)
+                            .tooltip("Clear the panel (the files keep everything)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.console.clear();
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("log-close")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip("Hide the log  Ctrl+`")
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_console(cx))),
+                    ),
+            )
+            .child(
+                div()
+                    .id("log-lines")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.console_scroll)
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .children(rows)
+                    .when(total == 0, |el| {
+                        el.child(
+                            div()
+                                .px_3()
+                                .text_xs()
+                                .text_color(look.muted)
+                                .child("Nothing logged yet. Start a copy, or loosen the filter."),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 
@@ -2329,7 +2923,7 @@ impl CopyWindow {
                     .child(phase),
             )
             .child(metric("Time", clock(progress.elapsed()), look))
-            .child(metric("Size", human_bytes(progress.bytes), look))
+            .child(metric("Size", human_bytes(progress.live_bytes()), look))
             .child(metric(
                 "Speed",
                 format!("{}/s", human_bytes(progress.rate())),
@@ -2422,7 +3016,7 @@ impl CopyWindow {
             .child(stat(
                 "size",
                 "Downloaded",
-                human_bytes(progress.bytes),
+                human_bytes(progress.live_bytes()),
                 look.text,
                 look,
             ));
@@ -2496,12 +3090,13 @@ impl CopyWindow {
 
         let body = match self.pane {
             Pane::Workers => self.workers_view(look),
-            Pane::Activity => self.activity_view(look),
+            Pane::Activity => self.activity_view(look, cx),
         };
 
         div()
             .flex_1()
-            .min_h_0()
+            // Tall enough for a few rows of activity under a long tab.
+            .min_h(px(RESULT_MIN_HEIGHT))
             .flex()
             .flex_col()
             .gap_3()
@@ -2609,15 +3204,7 @@ impl CopyWindow {
                                     .unwrap_or_else(|| "waiting for work".to_owned()),
                             ),
                     )
-                    .child(
-                        div()
-                            .w(px(64.))
-                            .flex()
-                            .justify_end()
-                            .text_xs()
-                            .text_color(look.muted)
-                            .child(waited),
-                    )
+                    .child(file_progress(worker, waited, look))
                     .child(
                         div()
                             .w(px(64.))
@@ -2639,7 +3226,8 @@ impl CopyWindow {
             .into_any_element()
     }
 
-    fn activity_view(&self, look: &Look) -> AnyElement {
+    fn activity_view(&self, look: &Look, cx: &mut Context<Self>) -> AnyElement {
+        let running = self.progress.running();
         let rows = self
             .progress
             .log
@@ -2649,14 +3237,18 @@ impl CopyWindow {
                 !self.errors_only || matches!(line.kind, LineKind::Failed | LineKind::Retry)
             })
             .take(ACTIVITY_ROWS)
-            .map(|line| {
+            .enumerate()
+            .map(|(index, line)| {
                 let color = match line.kind {
                     LineKind::Saved => look.success,
                     LineKind::Unchanged => look.info,
                     LineKind::Failed => look.danger,
                     LineKind::Retry => look.warning,
+                    LineKind::Skipped => look.muted,
+                    LineKind::Script => look.accent,
                     LineKind::Info => look.muted,
                 };
+                let actions = self.row_actions(index, line, running, cx);
                 div()
                     .min_h(px(24.))
                     .px_2()
@@ -2695,6 +3287,7 @@ impl CopyWindow {
                             })
                             .child(line.detail.clone()),
                     )
+                    .child(actions)
             });
         div()
             .id("log")
@@ -2784,7 +3377,10 @@ impl CopyWindow {
 
 impl Render for CopyWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.probed && std::env::var_os("MISTERCOPY_PROBE").is_some() {
+        if !self.probed
+            && (std::env::var_os("AMEL_PROBE").is_some()
+                || std::env::var_os("MISTERCOPY_PROBE").is_some())
+        {
             // Measures startup: report once the first frame is on screen, then quit.
             self.probed = true;
             window.on_next_frame(|window, cx| {
@@ -2817,6 +3413,8 @@ impl Render for CopyWindow {
             Tab::Browser => self.browser_view(&look, cx),
             Tab::Limits => self.limits_view(&look, cx),
             Tab::Auth => self.auth_view(&look, cx),
+            Tab::Types => self.types_view(&look, cx),
+            Tab::Script => self.script_view(&look, cx),
             Tab::Proxy => self.proxy_view(&look, cx),
             Tab::Output => self.output_view(&look, cx),
             Tab::LinkMap => self.map_view(&look, cx),
@@ -2824,13 +3422,15 @@ impl Render for CopyWindow {
         let result = self.result_panel(&look, cx);
         let status_bar = self.status_bar(&look, cx);
         let palette = self.palette_open.then(|| self.palette(&look, cx));
+        let console_panel = self.console_open.then(|| self.console_panel(&look, cx));
         div()
             .id("main-window")
             .track_focus(&self.focus)
-            .key_context("MisterCopy")
+            .key_context("Amel")
             .on_action(
                 cx.listener(|this, _: &TogglePalette, window, cx| this.toggle_palette(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ToggleConsole, _, cx| this.toggle_console(cx)))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if this.palette_open && event.keystroke.key == "escape" {
                     this.close_palette(window, cx);
@@ -2850,8 +3450,11 @@ impl Render for CopyWindow {
                     .flex()
                     .child(rail)
                     .child(sidebar)
+                    // The whole right column scrolls, so every tab and the
+                    // progress below stay reachable in a short window.
                     .child(
                         div()
+                            .id("main-column")
                             .flex_1()
                             .min_w_0()
                             .h_full()
@@ -2859,6 +3462,7 @@ impl Render for CopyWindow {
                             .flex_col()
                             .gap_3()
                             .p_3()
+                            .overflow_y_scrollbar()
                             .child(
                                 div()
                                     .flex_none()
@@ -2872,18 +3476,12 @@ impl Render for CopyWindow {
                                     .border_color(look.border)
                                     .child(request)
                                     .child(tabs)
-                                    // Long tabs scroll, so progress stays in view.
-                                    .child(
-                                        div()
-                                            .id("tab-body")
-                                            .max_h(px(290.))
-                                            .overflow_y_scroll()
-                                            .child(view),
-                                    ),
+                                    .child(div().id("tab-body").child(view)),
                             )
                             .child(result),
                     ),
             )
+            .children(console_panel)
             .child(status_bar)
             .children(palette)
     }
@@ -2916,6 +3514,96 @@ fn workers_line(progress: &Progress) -> String {
     }
     parts.push(format!("{} workers", progress.workers.len()));
     parts.join(" · ")
+}
+
+/// A worker's file: a small bar with "1.2 / 5.0 MiB" while it downloads,
+/// else how long it has waited.
+fn file_progress(worker: &job::Worker, waited: String, look: &Look) -> AnyElement {
+    let text = |content: String| {
+        div()
+            .text_xs()
+            .text_color(look.muted)
+            .whitespace_nowrap()
+            .child(content)
+    };
+    let cell = div()
+        .w(px(170.))
+        .flex()
+        .items_center()
+        .justify_end()
+        .gap_2();
+    let downloading = worker.url.is_some() && !worker.waiting;
+    match (downloading, worker.received, worker.total) {
+        (true, received, Some(total)) if total > 0 => {
+            let fraction = (received as f32 / total as f32).clamp(0., 1.);
+            cell.child(
+                div()
+                    .w(px(60.))
+                    .h(px(4.))
+                    .rounded_full()
+                    .bg(look.raised)
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h_full()
+                            .rounded_full()
+                            .bg(look.accent)
+                            .w(relative(fraction)),
+                    ),
+            )
+            .child(text(format!(
+                "{} / {}",
+                human_bytes(received),
+                human_bytes(total)
+            )))
+            .into_any_element()
+        }
+        (true, received, _) if received > 0 => {
+            cell.child(text(human_bytes(received))).into_any_element()
+        }
+        _ => cell.child(text(waited)).into_any_element(),
+    }
+}
+
+/// "videos" as "Videos".
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// A desktop notification for a finished copy, sent off the UI thread
+/// (it talks to the notification service).
+fn notify_finished(progress: &Progress) {
+    let (summary, body) = match &progress.phase {
+        job::Phase::Finished if progress.failed > 0 => (
+            "Copy finished with errors".to_owned(),
+            format!(
+                "{} files saved, {} failed.",
+                progress.saved, progress.failed
+            ),
+        ),
+        job::Phase::Finished => (
+            "Copy finished".to_owned(),
+            format!(
+                "{} files saved ({}).",
+                progress.saved,
+                human_bytes(progress.bytes)
+            ),
+        ),
+        job::Phase::Stopped => ("Copy stopped".to_owned(), progress.status()),
+        job::Phase::Failed(message) => ("Copy failed".to_owned(), message.clone()),
+        _ => return,
+    };
+    std::thread::spawn(move || {
+        let _ = notify_rust::Notification::new()
+            .appname("Amel Website Copier")
+            .summary(&summary)
+            .body(&body)
+            .show();
+    });
 }
 
 /// `0:42` or `1:02:03`.

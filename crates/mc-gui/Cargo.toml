@@ -1,6 +1,6 @@
 [package]
 name = "mc-gui"
-description = "The MisterCopy desktop app"
+description = "The Amel desktop app"
 version.workspace = true
 edition.workspace = true
 # GPUI needs a newer compiler than the library crates.
@@ -8,7 +8,7 @@ rust-version = "1.95"
 license.workspace = true
 
 [[bin]]
-name = "mistercopy-gui"
+name = "amel-gui"
 path = "src/main.rs"
 
 [features]
@@ -22,6 +22,11 @@ mc-core.workspace = true
 mc-requester.workspace = true
 mc-requester-playwright = { workspace = true, optional = true }
 mc-requester-wreq.workspace = true
+mc-script.workspace = true
+notify-rust = "4.17"
+anyhow.workspace = true
+lsp-types = "0.97"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 mc-store.workspace = true
 serde.workspace = true
 serde_json.workspace = true

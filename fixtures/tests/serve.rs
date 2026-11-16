@@ -30,7 +30,7 @@ async fn serves_the_static_blog() {
 
     let (status, body) = get(&server, "/").await;
     assert_eq!(status, 200);
-    assert!(body.contains("MisterCopy fixture: static-blog"));
+    assert!(body.contains("Amel fixture: static-blog"));
 
     for path in [
         "/posts/hello%20world.html",

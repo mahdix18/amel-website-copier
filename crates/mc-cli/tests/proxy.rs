@@ -5,8 +5,8 @@
 
 use mc_fixtures::{FixtureServer, ProxyServer, Site};
 
-async fn mistercopy(args: &[&str]) -> std::process::Output {
-    tokio::process::Command::new(env!("CARGO_BIN_EXE_mistercopy"))
+async fn amel(args: &[&str]) -> std::process::Output {
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_amel"))
         .args(args)
         .output()
         .await
@@ -19,7 +19,7 @@ async fn rotates_over_proxies_with_and_without_credentials() {
     let open = ProxyServer::start(false).await.unwrap();
     let locked = ProxyServer::start(true).await.unwrap();
     let out = tempfile::tempdir().unwrap();
-    let output = mistercopy(&[
+    let output = amel(&[
         "copy",
         site.base_url().as_str(),
         "-o",
@@ -52,7 +52,7 @@ async fn bypassed_hosts_go_direct_and_refusals_are_reported() {
     let site = FixtureServer::start(Site::StaticBlog).await.unwrap();
     let proxy = ProxyServer::start(false).await.unwrap();
     let out = tempfile::tempdir().unwrap();
-    let output = mistercopy(&[
+    let output = amel(&[
         "copy",
         site.base_url().as_str(),
         "-o",
@@ -72,7 +72,7 @@ async fn bypassed_hosts_go_direct_and_refusals_are_reported() {
     // A proxy that wants credentials and gets none: every fetch fails.
     let locked = ProxyServer::start(true).await.unwrap();
     let out = tempfile::tempdir().unwrap();
-    let output = mistercopy(&[
+    let output = amel(&[
         "copy",
         site.base_url().as_str(),
         "-o",
@@ -90,7 +90,7 @@ async fn bypassed_hosts_go_direct_and_refusals_are_reported() {
     assert_eq!(locked.carried(), 0);
 
     let empty = tempfile::tempdir().unwrap();
-    let bad = mistercopy(&[
+    let bad = amel(&[
         "copy",
         "http://x.test/",
         "-o",
@@ -115,7 +115,7 @@ async fn a_dead_proxy_in_the_list_fails_nothing() {
     // Nothing listens on port 1.
     let dead = "http://127.0.0.1:1";
     let out = tempfile::tempdir().unwrap();
-    let output = mistercopy(&[
+    let output = amel(&[
         "copy",
         site.base_url().as_str(),
         "-o",

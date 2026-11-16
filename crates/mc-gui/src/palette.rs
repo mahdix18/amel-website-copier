@@ -13,6 +13,8 @@ pub enum Command {
     Pause,
     /// Shrink to the mini window.
     Mini,
+    /// Show or hide the log panel.
+    Console,
     Show(Tab),
     ExportMap,
     OpenReport,
@@ -40,12 +42,15 @@ pub fn commands(cx: &Context<'_>) -> Vec<(String, Command)> {
         }
     }
     list.push(("Mini window".to_owned(), Command::Mini));
+    list.push(("Toggle log panel".to_owned(), Command::Console));
     list.push(("Show options".to_owned(), Command::Show(Tab::Copy)));
     list.push(("Show browser".to_owned(), Command::Show(Tab::Browser)));
     list.push(("Show limits".to_owned(), Command::Show(Tab::Limits)));
     list.push(("Show rules".to_owned(), Command::Show(Tab::Rules)));
     list.push(("Show authentication".to_owned(), Command::Show(Tab::Auth)));
     list.push(("Show proxy".to_owned(), Command::Show(Tab::Proxy)));
+    list.push(("Show file types".to_owned(), Command::Show(Tab::Types)));
+    list.push(("Show script".to_owned(), Command::Show(Tab::Script)));
     list.push(("Show output".to_owned(), Command::Show(Tab::Output)));
     list.push(("Show link map".to_owned(), Command::Show(Tab::LinkMap)));
     list.push(("Export link map as SVG".to_owned(), Command::ExportMap));

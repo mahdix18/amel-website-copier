@@ -1,6 +1,6 @@
 [package]
 name = "mc-fixtures"
-description = "Local test websites for MisterCopy, served over real HTTP"
+description = "Local test websites for Amel, served over real HTTP"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

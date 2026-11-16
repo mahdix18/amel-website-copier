@@ -1,4 +1,4 @@
-//! The MisterCopy crawler.
+//! The Amel crawler.
 //!
 //! [`Crawler`] fetches through any [`Requester`](mc_requester::Requester),
 //! saves each response under a path from [`map_url`], and once the crawl ends
@@ -7,6 +7,7 @@
 //! copy with conditional requests.
 
 mod crawler;
+mod filetype;
 mod normalize;
 mod path;
 mod replay;
@@ -19,9 +20,10 @@ mod store;
 mod warc;
 
 pub use crawler::{
-    CrawlConfig, CrawlError, CrawlEvent, CrawlSummary, Crawler, Credential, REPORT_HTML,
-    REPORT_JSON, STATE_DIR, StopHandle, StopReason, Verification,
+    CrawlConfig, CrawlError, CrawlEvent, CrawlSummary, Crawler, Credential, Hooks, LogLevel,
+    REPORT_HTML, REPORT_JSON, STATE_DIR, SavedInfo, StopHandle, StopReason, Verification,
 };
+pub use filetype::FileType;
 pub use mc_extract::LinkKind;
 pub use normalize::normalize;
 pub use path::{LocalPath, PathAllocator, map_url};

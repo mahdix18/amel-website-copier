@@ -16,6 +16,7 @@ mc-fixtures = { path = "fixtures" }
 mc-requester = { path = "crates/mc-requester" }
 mc-requester-playwright = { path = "crates/mc-requester-playwright" }
 mc-requester-wreq = { path = "crates/mc-requester-wreq" }
+mc-script = { path = "crates/mc-script" }
 mc-store = { path = "crates/mc-store" }
 
 anyhow = "1.0.104"

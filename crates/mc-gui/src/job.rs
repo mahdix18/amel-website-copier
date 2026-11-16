@@ -9,7 +9,7 @@ use mc_cli::archive::zip_copy;
 use mc_cli::options::{CrawlOptions, SessionArgs, parse_rate};
 use mc_cli::requesters::{build_requester, registry};
 use mc_core::{
-    CrawlEvent, CrawlStatus, CrawlSummary, Crawler, REPORT_HTML, StopHandle, human_bytes,
+    CrawlEvent, CrawlStatus, CrawlSummary, Crawler, FileType, REPORT_HTML, StopHandle, human_bytes,
 };
 use mc_requester::{AUTO_ID, ProxyRotation, Url, parse_proxy_list, without_credentials};
 use mc_store::SqliteStore;
@@ -22,14 +22,14 @@ const RATE_WINDOW: Duration = Duration::from_secs(3);
 /// Most parallel downloads the window offers.
 pub const MAX_WORKERS: usize = 32;
 
-/// Keys shared with the command-line tool, so `mistercopy resume` and
+/// Keys shared with the command-line tool, so `amel resume` and
 /// `update` work on copies started here.
 const META_SEED: &str = "seed";
 const META_OPTIONS: &str = "options";
 
 /// Everything the window's form holds, as typed. [`Settings::options`]
 /// turns it into the command line's options, so a copy started here saves
-/// the same choices `mistercopy resume` and `update` read back.
+/// the same choices `amel resume` and `update` read back.
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub url: String,
@@ -88,6 +88,17 @@ pub struct Settings {
     pub retries: String,
     /// Seconds before the first retry; later ones wait about twice as long.
     pub retry_delay_secs: String,
+    /// Smart slow-down on 429/503 answers.
+    pub adaptive: bool,
+    /// File types not downloaded.
+    pub skip_types: Vec<FileType>,
+    /// Size limits in MB per file type, as typed (empty: none).
+    pub type_limits: Vec<(FileType, String)>,
+    /// Run `script` with the copy.
+    pub script_on: bool,
+    pub script: String,
+    /// Fetch these URLs of the copy in the folder again.
+    pub retry_urls: Vec<String>,
 }
 
 impl Default for Settings {
@@ -129,6 +140,12 @@ impl Default for Settings {
             retry_failed: false,
             retries: "3".to_owned(),
             retry_delay_secs: "1".to_owned(),
+            adaptive: true,
+            skip_types: Vec::new(),
+            type_limits: Vec::new(),
+            script_on: false,
+            script: mc_script::TEMPLATE.to_owned(),
+            retry_urls: Vec::new(),
         }
     }
 }
@@ -187,8 +204,18 @@ impl Settings {
             zip: self.zip,
             replay: self.replay && self.render_js,
             verify: self.verify,
+            adaptive_delay: self.adaptive,
+            skip_types: self.skip_types.clone(),
             ..CrawlOptions::default()
         };
+        for (kind, limit) in &self.type_limits {
+            if let Some(mb) = number::<u64>(limit, &format!("Size limit for {kind}"))? {
+                options.type_limits.push((*kind, mb));
+            }
+        }
+        if self.script_on {
+            options.script = Some(script_path(output));
+        }
         if let Some(retries) = number::<u32>(&self.retries, "Retries")? {
             options.retries = retries.min(20);
         }
@@ -295,6 +322,11 @@ pub fn expand_home(text: &str) -> PathBuf {
     }
 }
 
+/// Where the window keeps the script it runs with a copy.
+pub fn script_path(output: &Path) -> PathBuf {
+    output.join(mc_core::STATE_DIR).join("hooks.js")
+}
+
 /// Where a browser login made from the window keeps its cookies: inside the
 /// copy's state folder, which zips and reports leave out.
 pub fn login_cookies(output: &Path) -> PathBuf {
@@ -347,9 +379,9 @@ pub fn browser_support() -> bool {
 }
 
 /// The folder under the home directory that copies go to by default. Not
-/// plain `MisterCopy`, which is also the usual name of a checkout of this
+/// plain `Amel`, which is also the usual name of a checkout of this
 /// project.
-pub const DEFAULT_FOLDER: &str = "MisterCopy Copies";
+pub const DEFAULT_FOLDER: &str = "Amel Copies";
 
 /// Where copies go unless the user picks another folder.
 pub fn default_output() -> String {
@@ -416,7 +448,7 @@ pub fn check_proxies(settings: &Settings) -> Result<oneshot::Receiver<Vec<ProxyC
     }
     let (send, receive) = oneshot::channel();
     std::thread::Builder::new()
-        .name("mistercopy-proxy-check".to_owned())
+        .name("amel-proxy-check".to_owned())
         .spawn(move || {
             let checks = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -532,15 +564,28 @@ pub fn start(settings: &Settings) -> Result<Running, String> {
         .map_err(|e| e.to_string())?;
 
     config.retry_failed = settings.retry_failed;
+    config.retry_urls = settings
+        .retry_urls
+        .iter()
+        .filter_map(|url| Url::parse(url).ok())
+        .collect();
     let workers = config.concurrency;
     let zip = options.zip;
-    let crawler = Crawler::new(config, requester).with_store(store);
+    let mut crawler = Crawler::new(config, requester).with_store(store);
+    if let Some(path) = &options.script {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(path, &settings.script).map_err(|e| e.to_string())?;
+        let hooks = mc_script::ScriptHooks::from_file(path)?;
+        crawler = crawler.with_hooks(std::sync::Arc::new(hooks));
+    }
     let stop = crawler.stop_handle();
     let events = crawler.subscribe();
     let (finished, done) = oneshot::channel();
     let zip_dir = output.clone();
     std::thread::Builder::new()
-        .name("mistercopy-crawl".to_owned())
+        .name("amel-crawl".to_owned())
         .spawn(move || {
             let result = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -585,6 +630,10 @@ pub enum LineKind {
     Unchanged,
     Failed,
     Retry,
+    /// Left out by a type, size or script rule.
+    Skipped,
+    /// A message from the script.
+    Script,
     Info,
 }
 
@@ -596,6 +645,8 @@ impl LineKind {
             Self::Unchanged => "304",
             Self::Failed => "ERR",
             Self::Retry => "RETRY",
+            Self::Skipped => "SKIP",
+            Self::Script => "JS",
             Self::Info => "INFO",
         }
     }
@@ -607,6 +658,10 @@ pub struct LogLine {
     pub text: String,
     /// Size, delay or reason, shown right-aligned.
     pub detail: String,
+    /// The URL the line is about, for its actions (copy, open, retry).
+    pub url: Option<String>,
+    /// Where the file was saved, for "open file".
+    pub path: Option<PathBuf>,
 }
 
 impl LogLine {
@@ -625,6 +680,9 @@ pub struct Worker {
     pub since: Option<Instant>,
     /// Requests this worker has made.
     pub requests: usize,
+    /// How much of the current file has arrived, and its size when known.
+    pub received: u64,
+    pub total: Option<u64>,
 }
 
 /// What the window shows about the current (or last) copy.
@@ -724,7 +782,19 @@ impl Progress {
             return 0;
         };
         let secs = now.duration_since(at).as_secs_f64().max(0.5);
-        (self.bytes.saturating_sub(bytes) as f64 / secs) as u64
+        (self.live_bytes().saturating_sub(bytes) as f64 / secs) as u64
+    }
+
+    /// Bytes downloaded so far, counting what has arrived of the files
+    /// still downloading (a large file shows up before it is done).
+    pub fn live_bytes(&self) -> u64 {
+        let arriving: u64 = self
+            .workers
+            .iter()
+            .filter(|w| w.url.is_some() && !w.waiting)
+            .map(|w| w.received)
+            .sum();
+        self.bytes + if self.running() { arriving } else { 0 }
     }
 
     /// Workers with a request on the wire.
@@ -737,11 +807,38 @@ impl Progress {
 
     pub fn apply(&mut self, event: &CrawlEvent) {
         match event {
-            CrawlEvent::Saved { url, bytes, .. } => {
+            CrawlEvent::Saved { url, path, bytes } => {
                 self.saved += 1;
                 self.bytes += bytes;
                 self.sample();
                 self.push(LineKind::Saved, url.as_str(), human_bytes(*bytes));
+                if let Some(line) = self.log.back_mut() {
+                    line.path = Some(path.clone());
+                }
+            }
+            CrawlEvent::Downloading {
+                worker,
+                received,
+                total,
+            } => {
+                if let Some(slot) = self.worker(*worker) {
+                    slot.received = *received;
+                    slot.total = *total;
+                }
+                self.sample();
+            }
+            CrawlEvent::ScriptLog { message } => {
+                self.push(LineKind::Script, message, String::new());
+            }
+            CrawlEvent::Skipped { url, reason }
+                if matches!(
+                    reason,
+                    mc_core::SkipReason::FileType
+                        | mc_core::SkipReason::TooBig
+                        | mc_core::SkipReason::Script
+                ) =>
+            {
+                self.push(LineKind::Skipped, url.as_str(), reason.to_string());
             }
             CrawlEvent::Unchanged { url } => {
                 self.unchanged += 1;
@@ -790,6 +887,8 @@ impl Progress {
                     slot.waiting = false;
                     slot.since = Some(Instant::now());
                     slot.requests += 1;
+                    slot.received = 0;
+                    slot.total = None;
                 }
             }
             CrawlEvent::WorkerIdle { worker } => {
@@ -823,6 +922,24 @@ impl Progress {
                     self.info(&text);
                 }
             }
+            CrawlEvent::Pace { host, gap, slower } => {
+                let text = if *slower {
+                    format!(
+                        "{host} is busy: slowing down to {:.1}s between requests",
+                        gap.as_secs_f64()
+                    )
+                } else {
+                    format!(
+                        "{host} keeps up: {:.1}s between requests",
+                        gap.as_secs_f64()
+                    )
+                };
+                if *slower {
+                    self.push(LineKind::Retry, &text, String::new());
+                } else {
+                    self.info(&text);
+                }
+            }
             CrawlEvent::SitemapRead { url, pages } => {
                 self.info(&format!("Sitemap {url}: {pages} pages listed"));
             }
@@ -846,7 +963,7 @@ impl Progress {
         {
             self.samples.pop_front();
         }
-        self.samples.push_back((now, self.bytes));
+        self.samples.push_back((now, self.live_bytes()));
     }
 
     pub fn finish(&mut self, result: Result<CrawlSummary, String>, output: &Path) {
@@ -929,10 +1046,20 @@ impl Progress {
         if self.log.len() == LOG_LINES {
             self.log.pop_front();
         }
+        let about_a_url = matches!(
+            kind,
+            LineKind::Saved
+                | LineKind::Unchanged
+                | LineKind::Failed
+                | LineKind::Retry
+                | LineKind::Skipped
+        );
         self.log.push_back(LogLine {
             kind,
             text: text.to_owned(),
             detail,
+            url: about_a_url.then(|| text.to_owned()),
+            path: None,
         });
     }
 }
@@ -1007,6 +1134,34 @@ mod tests {
     }
 
     #[test]
+    fn counts_bytes_still_arriving() {
+        let url = Url::parse("https://s.test/big.bin").unwrap();
+        let mut progress = Progress::started(false, 2);
+        progress.apply(&CrawlEvent::Fetching {
+            worker: 0,
+            url: url.clone(),
+        });
+        progress.apply(&CrawlEvent::Downloading {
+            worker: 0,
+            received: 4 * 1024 * 1024,
+            total: Some(20 * 1024 * 1024),
+        });
+        assert_eq!(progress.bytes, 0, "nothing finished yet");
+        assert_eq!(progress.live_bytes(), 4 * 1024 * 1024);
+        std::thread::sleep(Duration::from_millis(30));
+        progress.apply(&CrawlEvent::Downloading {
+            worker: 0,
+            received: 8 * 1024 * 1024,
+            total: Some(20 * 1024 * 1024),
+        });
+        assert!(
+            progress.rate() > 0,
+            "the speed shows while a big file arrives"
+        );
+        assert_eq!(progress.workers[0].total, Some(20 * 1024 * 1024));
+    }
+
+    #[test]
     fn reads_the_retry_fields() {
         let seed = Url::parse("https://s.test/").unwrap();
         let mut form = Settings {
@@ -1016,6 +1171,17 @@ mod tests {
         };
         let (options, _) = form.options(&seed, Path::new("/out")).unwrap();
         assert_eq!((options.retries, options.retry_delay_ms), (5, 2500));
+        assert!(options.adaptive_delay, "smart slow-down is on by default");
+        let off = Settings {
+            adaptive: false,
+            ..form.clone()
+        };
+        assert!(
+            !off.options(&seed, Path::new("/out"))
+                .unwrap()
+                .0
+                .adaptive_delay
+        );
         form.retries = "99".to_owned();
         assert_eq!(
             form.options(&seed, Path::new("/out")).unwrap().0.retries,

@@ -20,6 +20,15 @@ fn open(
     cx: &mut TestAppContext,
     projects: &std::path::Path,
 ) -> (WindowHandle<Root>, Entity<CopyWindow>) {
+    open_sized(cx, projects, 880., 680.)
+}
+
+fn open_sized(
+    cx: &mut TestAppContext,
+    projects: &std::path::Path,
+    width: f32,
+    height: f32,
+) -> (WindowHandle<Root>, Entity<CopyWindow>) {
     let projects = Projects::load(Some(projects.join("projects.json")));
     cx.update(|cx| {
         gpui_kit::init(cx);
@@ -27,7 +36,7 @@ fn open(
         mc_gui::bind_keys(cx);
         let bounds = Bounds {
             origin: Point::default(),
-            size: size(px(880.), px(680.)),
+            size: size(px(width), px(height)),
         };
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -144,7 +153,7 @@ fn copies_a_site_from_the_window(cx: &mut TestAppContext) {
 
     let host = format!("127.0.0.1_{}", server.addr().port());
     assert!(out.path().join(&host).join("posts/café.html").is_file());
-    assert!(out.path().join("mistercopy-report.html").is_file());
+    assert!(out.path().join("amel-report.html").is_file());
     let svg = std::fs::read_to_string(out.path().join(mc_gui::app::LINK_MAP_SVG)).unwrap();
     assert!(
         svg.starts_with("<svg") && svg.contains("posts/caf%C3%A9.html"),
@@ -306,6 +315,8 @@ fn picks_a_browser_to_impersonate(cx: &mut TestAppContext) {
             window.try_find("verify").is_some(),
             "the missed-files checkbox"
         );
+        assert!(window.try_find("adaptive").is_some(), "the smart checkbox");
+        assert!(window.try_find("retries").is_some(), "the retries input");
         // The requester chip opens the Browser tab.
         window.click("requester", cx);
         assert_eq!(
@@ -499,4 +510,164 @@ fn retries_only_the_failed_files(cx: &mut TestAppContext) {
         "the retried start page led to the rest"
     );
     assert!(progress.log.iter().any(|line| line.contains("Retrying")));
+}
+
+#[gpui_kit::test]
+fn types_scripts_and_row_actions(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime
+        .block_on(FixtureServer::start(Site::StaticBlog))
+        .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    // Tall enough to show the activity rows below the settings.
+    let (handle, view) = open_sized(cx, config.path(), 1180., 1100.);
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        let output = out.path().to_string_lossy().into_owned();
+        view.update(cx, |view, cx| {
+            view.speed = mc_gui::job::Speed::Fast;
+            view.output_input()
+                .clone()
+                .update(cx, |input, cx| input.set_value(output, window, cx));
+        });
+        window.render_frame(cx);
+        window.click("url", cx);
+        window.input(server.base_url().as_str(), cx);
+        window.click("tab-types", cx);
+        window.click("type-image", cx);
+        window.click("tab-script", cx);
+        window.click("script-on", cx);
+        window.click("copy", cx);
+    })
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while cx.update(|cx| view.read(cx).progress().running()) {
+        assert!(Instant::now() < deadline, "the copy didn't finish");
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    cx.run_until_parked();
+
+    let progress = cx.update(|cx| view.read(cx).progress().clone());
+    assert_eq!(progress.phase, Phase::Finished, "{}", progress.status());
+    let tags: Vec<&str> = progress.log.iter().map(|l| l.kind.tag()).collect();
+    assert!(tags.contains(&"SKIP"), "images were left out: {tags:?}");
+    let script: Vec<&str> = progress
+        .log
+        .iter()
+        .filter(|l| l.kind.tag() == "JS")
+        .map(|l| l.text.as_str())
+        .collect();
+    assert!(
+        script.iter().any(|t| t.starts_with("Copying ")),
+        "{script:?}"
+    );
+    assert!(script.iter().any(|t| t.starts_with("Done: ")), "{script:?}");
+
+    // The newest row is about a URL; its copy button puts it on the clipboard.
+    let newest_url = progress
+        .log
+        .iter()
+        .rev()
+        .find_map(|l| l.url.clone())
+        .unwrap();
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let first_with_url = progress
+            .log
+            .iter()
+            .rev()
+            .position(|l| l.url.is_some())
+            .unwrap();
+        window.click(
+            gpui_kit::ElementId::Name(format!("act-copy-{first_with_url}").into()),
+            cx,
+        );
+    })
+    .unwrap();
+    let clipboard = cx.update(|cx| cx.read_from_clipboard().and_then(|c| c.text()));
+    assert_eq!(clipboard.as_deref(), Some(newest_url.as_str()));
+}
+
+#[gpui_kit::test]
+fn the_log_panel_records_filters_and_clears(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime
+        .block_on(FixtureServer::start(Site::StaticBlog))
+        .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let (handle, view) = open_sized(cx, config.path(), 1180., 1000.);
+    cx.update_window(handle.into(), |_, window, cx| {
+        let output = out.path().to_string_lossy().into_owned();
+        view.update(cx, |view, cx| {
+            view.speed = mc_gui::job::Speed::Fast;
+            view.output_input()
+                .clone()
+                .update(cx, |input, cx| input.set_value(output, window, cx));
+        });
+        window.render_frame(cx);
+        assert!(window.try_find("console").is_none(), "closed at first");
+        window.click("console-toggle", cx);
+        assert!(window.try_find("console").is_some());
+        window.click("url", cx);
+        window.input(server.base_url().as_str(), cx);
+        window.click("copy", cx);
+    })
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while cx.update(|cx| view.read(cx).progress().running()) {
+        assert!(Instant::now() < deadline, "the copy didn't finish");
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    cx.run_until_parked();
+    let text = cx.update(|cx| {
+        view.read(cx)
+            .console()
+            .text(mc_gui::console::Filter::All, "")
+    });
+    assert!(
+        text.contains("INFO  copy    saved http://127.0.0.1"),
+        "{text}"
+    );
+    assert!(text.contains("DEBUG copy    worker 1 GET"), "{text}");
+    assert!(text.lines().last().unwrap().contains("Copied "), "{text}");
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("log-filter-errors", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("log-count").label(), Some("0 lines"));
+        window.click("log-filter-all", cx);
+        window.click("log-search", cx);
+        window.input("about", cx);
+        window.render_frame(cx);
+        let label = window
+            .find("log-count")
+            .label()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(label != "0 lines", "{label}");
+        window.click("log-clear", cx);
+        window.render_frame(cx);
+        assert_eq!(window.find("log-count").label(), Some("0 lines"));
+    })
+    .unwrap();
+    // The daily file keeps what the panel cleared.
+    let logs = config.path().join("logs");
+    let file = std::fs::read_dir(&logs)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let saved = std::fs::read_to_string(file).unwrap();
+    assert!(saved.contains("saved http://127.0.0.1"));
+    // The panel stays open next time.
+    let prefs = std::fs::read_to_string(config.path().join("prefs.json")).unwrap();
+    assert!(prefs.contains("\"console_open\": true"), "{prefs}");
 }

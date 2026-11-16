@@ -1,11 +1,11 @@
-//! `mistercopy retry`: fetch again what failed, end to end over real HTTP.
+//! `amel retry`: fetch again what failed, end to end over real HTTP.
 
 #![allow(clippy::unwrap_used)]
 
 use mc_fixtures::{FixtureServer, Site};
 
-async fn mistercopy(args: &[&str]) -> std::process::Output {
-    tokio::process::Command::new(env!("CARGO_BIN_EXE_mistercopy"))
+async fn amel(args: &[&str]) -> std::process::Output {
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_amel"))
         .args(args)
         .output()
         .await
@@ -18,7 +18,7 @@ async fn retry_recovers_a_failure_without_copying_again() {
     let out = tempfile::tempdir().unwrap();
     let dir = out.path().to_str().unwrap();
     // No retries: /rate-limited (429 twice, then OK) fails the first time.
-    let first = mistercopy(&[
+    let first = amel(&[
         "copy",
         site.base_url().as_str(),
         "-o",
@@ -43,9 +43,9 @@ async fn retry_recovers_a_failure_without_copying_again() {
     assert!(stderr.contains("rate-limited"), "{stderr}");
 
     // Its second refusal, then the answer.
-    let second = mistercopy(&["retry", dir, "-q"]).await;
+    let second = amel(&["retry", dir, "-q"]).await;
     assert!(String::from_utf8_lossy(&second.stderr).contains("rate-limited"));
-    let third = mistercopy(&["retry", dir]).await;
+    let third = amel(&["retry", dir]).await;
     let stdout = String::from_utf8_lossy(&third.stdout);
     assert!(stdout.contains("Retrying"), "{stdout}");
     let stderr = String::from_utf8_lossy(&third.stderr);
@@ -62,7 +62,7 @@ async fn retry_on_a_clean_copy_does_nothing() {
     let site = FixtureServer::start(Site::StaticBlog).await.unwrap();
     let out = tempfile::tempdir().unwrap();
     let dir = out.path().to_str().unwrap();
-    let copy = mistercopy(&[
+    let copy = amel(&[
         "copy",
         site.base_url().as_str(),
         "-o",
@@ -73,7 +73,7 @@ async fn retry_on_a_clean_copy_does_nothing() {
     ])
     .await;
     assert!(copy.status.success());
-    let retry = mistercopy(&["retry", dir]).await;
+    let retry = amel(&["retry", dir]).await;
     assert!(retry.status.success());
     assert!(String::from_utf8_lossy(&retry.stdout).contains("nothing to retry"));
 }

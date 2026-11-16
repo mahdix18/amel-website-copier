@@ -10,17 +10,18 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use mc_extract::{Link, LinkKind, extract_css, extract_html, rewrite_css, rewrite_html};
 use mc_requester::{
     Body, CapturedResponse, FetchContext, FetchError, FetchRequest, FetchResponse, HeaderMap,
-    Method, Requester, StatusCode, Validators, header,
+    Method, ProgressSink, Requester, StatusCode, Validators, header,
 };
 use tokio::sync::{Notify, broadcast};
 use tokio::task::{self, JoinSet};
 use tokio::time::Instant as Deadline;
 use url::Url;
 
+use crate::filetype::FileType;
 use crate::normalize::normalize;
 use crate::path::{LocalPath, PathAllocator, hash_hex};
 use crate::replay::{self, Manifest, REPLAY_SCRIPT};
-use crate::report::Report;
+use crate::report::{Report, human_bytes};
 use crate::retry::{self, MAX_RETRY_AFTER};
 use crate::robots::{self, RobotsRules};
 use crate::rules::{Decision, Policy, Rule, Scope, SkipReason};
@@ -32,6 +33,12 @@ use crate::warc::WarcWriter;
 
 /// Redirect hops followed between entries before giving up on a cycle.
 const MAX_ALIAS_HOPS: usize = 16;
+/// Smart slow-down: the first gap after a 429/503 (when none was set), the
+/// longest it grows, and how many good answers in a row earn a step back.
+const ADAPTIVE_START: Duration = Duration::from_millis(500);
+const ADAPTIVE_MAX: Duration = Duration::from_secs(60);
+const ADAPTIVE_RECOVERY: u32 = 10;
+
 /// Sitemap files read per crawl, indexes included.
 const MAX_SITEMAPS: usize = 200;
 /// Pages queued from sitemaps per crawl.
@@ -39,10 +46,10 @@ const MAX_SITEMAP_PAGES: usize = 200_000;
 
 /// Inside the output directory: crawl state and pristine copies of the
 /// documents whose links get rewritten.
-pub const STATE_DIR: &str = ".mistercopy";
+pub const STATE_DIR: &str = ".amel";
 const ORIGINALS_DIR: &str = "originals";
-pub const REPORT_JSON: &str = "mistercopy-report.json";
-pub const REPORT_HTML: &str = "mistercopy-report.html";
+pub const REPORT_JSON: &str = "amel-report.json";
+pub const REPORT_HTML: &str = "amel-report.html";
 
 #[derive(Debug, Clone)]
 pub struct CrawlConfig {
@@ -89,6 +96,44 @@ pub struct CrawlConfig {
     /// When continuing a copy from its store, queue the URLs that failed
     /// before (whatever the reason) to be fetched again.
     pub retry_failed: bool,
+    /// Smart slow-down: a 429 or 503 doubles the gap between requests to
+    /// that host; a run of good answers shrinks it back toward the
+    /// configured delay.
+    pub adaptive: bool,
+    /// File types not downloaded (pages linked from the seeds still are).
+    pub skip_types: Vec<FileType>,
+    /// Size limits per file type, in bytes.
+    pub type_limits: Vec<(FileType, u64)>,
+    /// When continuing a copy from its store, fetch these URLs again,
+    /// whatever became of them.
+    pub retry_urls: Vec<Url>,
+}
+
+/// What a script (or any other observer) can do around a crawl. Every
+/// method has a default, so a hook implements only what it needs.
+pub trait Hooks: Send + Sync {
+    fn on_start(&self, _seeds: &[Url], _output: &Path) {}
+    /// Called before each download; `false` skips the URL.
+    fn should_fetch(&self, _url: &Url, _kind: LinkKind) -> bool {
+        true
+    }
+    fn on_file(&self, _file: &SavedInfo) {}
+    fn on_error(&self, _url: &Url, _reason: &str) {}
+    fn on_finish(&self, _summary: &CrawlSummary) {}
+    /// Messages the hook wants shown, taken after each call.
+    fn take_logs(&self) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+/// A file just saved, as hooks see it.
+#[derive(Debug, Clone)]
+pub struct SavedInfo {
+    pub url: Url,
+    pub path: PathBuf,
+    pub bytes: u64,
+    pub mime: Option<String>,
+    pub file_type: FileType,
 }
 
 impl CrawlConfig {
@@ -120,6 +165,10 @@ impl CrawlConfig {
             max_rate: None,
             verify: false,
             retry_failed: false,
+            adaptive: false,
+            skip_types: Vec::new(),
+            type_limits: Vec::new(),
+            retry_urls: Vec::new(),
         }
     }
 }
@@ -270,6 +319,23 @@ pub enum CrawlEvent {
         recovered: usize,
         still_missing: usize,
     },
+    /// Worker `worker` has received this much of its file so far.
+    Downloading {
+        worker: usize,
+        received: u64,
+        total: Option<u64>,
+    },
+    /// A message from a script hook.
+    ScriptLog {
+        message: String,
+    },
+    /// Smart slow-down changed the gap between requests to `host`: longer
+    /// after a 429/503 (`slower`), shorter after a run of good answers.
+    Pace {
+        host: String,
+        gap: Duration,
+        slower: bool,
+    },
     /// A sitemap was read and listed this many pages.
     SitemapRead {
         url: Url,
@@ -282,6 +348,119 @@ pub enum CrawlEvent {
         total: usize,
         active: usize,
     },
+}
+
+/// How much a log line matters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LogLevel {
+    /// Each request, wait and skip: useful when digging.
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Debug => "DEBUG",
+            Self::Info => "INFO",
+            Self::Warn => "WARN",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+impl CrawlEvent {
+    /// The event as a log line: its level, its source and the message.
+    /// `None` for counts and byte progress, which would drown the rest.
+    pub fn describe(&self) -> Option<(LogLevel, &'static str, String)> {
+        use CrawlEvent as E;
+        use LogLevel as Level;
+        Some(match self {
+            E::Saved { url, path, bytes } => (
+                Level::Info,
+                "copy",
+                format!(
+                    "saved {url} ({}) -> {}",
+                    human_bytes(*bytes),
+                    path.display()
+                ),
+            ),
+            E::Unchanged { url } => (Level::Info, "copy", format!("unchanged {url}")),
+            E::Failed { url, reason } => (Level::Error, "copy", format!("failed {url}: {reason}")),
+            E::Skipped { url, reason } => {
+                (Level::Debug, "copy", format!("skipped {url}: {reason}"))
+            }
+            E::Retrying {
+                url,
+                attempt,
+                delay,
+                reason,
+            } => (
+                Level::Warn,
+                "copy",
+                format!(
+                    "retry {attempt} for {url} in {:.1}s: {reason}",
+                    delay.as_secs_f64()
+                ),
+            ),
+            E::Stopping { reason } => (Level::Warn, "copy", format!("stopping: {reason}")),
+            E::Paused => (Level::Info, "copy", "paused".to_owned()),
+            E::Resumed => (Level::Info, "copy", "resumed".to_owned()),
+            E::Rewriting { documents } => (
+                Level::Info,
+                "copy",
+                format!("rewriting links in {documents} pages"),
+            ),
+            E::Waiting { worker, url } => (
+                Level::Debug,
+                "copy",
+                format!("worker {} waits for its turn: {url}", worker + 1),
+            ),
+            E::Fetching { worker, url } => (
+                Level::Debug,
+                "copy",
+                format!("worker {} GET {url}", worker + 1),
+            ),
+            E::Verifying { files, retrying } => (
+                Level::Info,
+                "copy",
+                format!("checking {files} saved files; fetching {retrying} again"),
+            ),
+            E::Verified {
+                recovered,
+                still_missing,
+            } => (
+                if *still_missing > 0 {
+                    Level::Warn
+                } else {
+                    Level::Info
+                },
+                "copy",
+                format!("check done: {recovered} recovered, {still_missing} still missing"),
+            ),
+            E::Pace { host, gap, slower } => (
+                if *slower { Level::Warn } else { Level::Info },
+                "copy",
+                format!(
+                    "{host}: {} to {:.1}s between requests",
+                    if *slower {
+                        "slowing down"
+                    } else {
+                        "speeding up"
+                    },
+                    gap.as_secs_f64()
+                ),
+            ),
+            E::SitemapRead { url, pages } => {
+                (Level::Info, "copy", format!("sitemap {url}: {pages} pages"))
+            }
+            E::ScriptLog { message } => (Level::Info, "script", message.clone()),
+            // Counts and byte-by-byte progress would drown everything else.
+            E::WorkerIdle { .. } | E::Progress { .. } | E::Downloading { .. } => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -338,6 +517,7 @@ pub struct Crawler {
     store: Option<Box<dyn StateStore>>,
     stop: StopHandle,
     limit: Option<Arc<RateLimit>>,
+    hooks: Option<Arc<dyn Hooks>>,
 }
 
 impl Crawler {
@@ -349,6 +529,7 @@ impl Crawler {
             .map(|rate| Arc::new(RateLimit::new(rate)));
         Self {
             limit,
+            hooks: None,
             config,
             requester,
             events,
@@ -361,6 +542,23 @@ impl Crawler {
     pub fn with_store(mut self, store: impl StateStore + 'static) -> Self {
         self.store = Some(Box::new(store));
         self
+    }
+
+    /// Calls `hooks` around the crawl: at the start, before each download,
+    /// for each file and failure, and at the finish.
+    pub fn with_hooks(mut self, hooks: Arc<dyn Hooks>) -> Self {
+        self.hooks = Some(hooks);
+        self
+    }
+
+    /// Runs a hook, then shows what it logged.
+    fn hook<R>(&self, call: impl FnOnce(&dyn Hooks) -> R) -> Option<R> {
+        let hooks = self.hooks.as_deref()?;
+        let result = call(hooks);
+        for message in hooks.take_logs() {
+            self.emit(CrawlEvent::ScriptLog { message });
+        }
+        Some(result)
     }
 
     /// Progress events. A receiver that falls too far behind skips ahead.
@@ -405,6 +603,7 @@ impl Crawler {
             .await
             .map_err(CrawlError::Requester)?;
 
+        self.hook(|hooks| hooks.on_start(&seeds, &self.config.output_dir));
         if self.config.use_sitemaps {
             self.discover_sitemaps(&mut state, &policy, &seeds).await;
         }
@@ -442,6 +641,7 @@ impl Crawler {
 
         let mut summary = self.summarize(&state, &seeds, started.elapsed());
         summary.verification = verification;
+        self.hook(|hooks| hooks.on_finish(&summary));
         if !self.config.dry_run && self.config.write_report {
             self.write_report(&summary.report).await?;
         }
@@ -571,11 +771,14 @@ impl Crawler {
                 state.count(None, &entry.state);
                 state.entries.insert(entry.url.clone(), entry);
             }
-            if self.config.retry_failed {
+            if self.config.retry_failed || !self.config.retry_urls.is_empty() {
                 let failed: Vec<UrlEntry> = state
                     .entries
                     .values()
-                    .filter(|entry| matches!(entry.state, EntryState::Failed(_)))
+                    .filter(|entry| {
+                        (self.config.retry_failed && matches!(entry.state, EntryState::Failed(_)))
+                            || self.config.retry_urls.contains(&entry.url)
+                    })
                     .cloned()
                     .collect();
                 for entry in failed {
@@ -913,17 +1116,35 @@ impl Crawler {
                 }
             }
 
+            // A file type the rules leave out, judged by its extension before
+            // anything is downloaded (the start pages are always fetched).
+            let guessed = FileType::guess(&job.url);
+            if job.referrer.is_some()
+                && guessed.is_some_and(|kind| self.config.skip_types.contains(&kind))
+            {
+                self.skip(state, &job, SkipReason::FileType);
+                continue;
+            }
+            if self.hook(|hooks| hooks.should_fetch(&job.url, job.kind)) == Some(false) {
+                self.skip(state, &job, SkipReason::Script);
+                continue;
+            }
+
             state.fetched += 1;
-            let request = self.request_for(state, policy, &job);
+            let mut request = self.request_for(state, policy, &job);
+            request.max_body_bytes = guessed.and_then(|kind| self.type_limit(kind));
             let slot = state.reserve_slot(&job.url, self.config.per_host_delay);
             let requester = Arc::clone(&self.requester);
+            let tracked = job.clone();
+            let worker = workers.pop().unwrap_or_default();
             let context = FetchContext {
                 referrer: job.referrer.clone(),
                 depth: job.depth,
                 attempt: job.attempt,
+                progress: Some(self.progress_sink(worker)),
+                partial_dir: (!self.config.dry_run)
+                    .then(|| self.config.output_dir.join(STATE_DIR).join(PARTIAL_DIR)),
             };
-            let tracked = job.clone();
-            let worker = workers.pop().unwrap_or_default();
             self.announce(worker, &job.url, slot);
             let events = self.events.clone();
             let limit = self.limit.clone();
@@ -1022,6 +1243,14 @@ impl Crawler {
         let response = match result {
             Ok(response) => response,
             Err(error) => {
+                // Over the size limit set for its file type: a rule, not a failure.
+                if matches!(error, FetchError::TooLarge { .. })
+                    && FileType::guess(&job.url)
+                        .and_then(|kind| self.type_limit(kind))
+                        .is_some()
+                {
+                    return self.skip(state, &job, SkipReason::TooBig);
+                }
                 if retry::retryable_error(&error) && job.attempt < self.config.max_retries {
                     return self.retry(state, job, None, error.to_string());
                 }
@@ -1029,6 +1258,9 @@ impl Crawler {
             }
         };
         let status = response.status;
+        if self.config.adaptive {
+            self.adapt(state, &job.url, status);
+        }
 
         if retry::retryable_status(status) && job.attempt < self.config.max_retries {
             let after = retry::retry_after(&response.headers, SystemTime::now());
@@ -1079,7 +1311,27 @@ impl Crawler {
             ..job
         };
 
-        let body = if page.head {
+        let mime = response.mime_type().or_else(|| {
+            mime_guess::from_path(final_url.path())
+                .first_raw()
+                .map(str::to_owned)
+        });
+        let document = document_kind(mime.as_deref(), &response.headers);
+        let file_type = mime.as_deref().map_or(FileType::Other, FileType::from_mime);
+        // A large body the requester left in a file moves into place as is,
+        // unless something needs its bytes (links, the WARC, replay).
+        let spilled = match &response.body {
+            Body::File(temp)
+                if !page.head
+                    && document.is_none()
+                    && self.config.warc.is_none()
+                    && !self.config.replay =>
+            {
+                Some(temp.clone())
+            }
+            _ => None,
+        };
+        let body = if page.head || spilled.is_some() {
             Vec::new()
         } else {
             match read_body(&response.body).await {
@@ -1089,12 +1341,18 @@ impl Crawler {
                 }
             }
         };
-        let mime = response.mime_type().or_else(|| {
-            mime_guess::from_path(final_url.path())
-                .first_raw()
-                .map(str::to_owned)
-        });
-        let document = document_kind(mime.as_deref(), &response.headers);
+        let size = match &spilled {
+            Some(temp) => tokio::fs::metadata(temp).await.map_or(0, |m| m.len()),
+            None => body.len() as u64,
+        };
+        if page.referrer.is_some() && self.config.skip_types.contains(&file_type) {
+            discard(spilled.as_deref()).await;
+            return self.skip(state, &page, SkipReason::FileType);
+        }
+        if self.type_limit(file_type).is_some_and(|limit| size > limit) {
+            discard(spilled.as_deref()).await;
+            return self.skip(state, &page, SkipReason::TooBig);
+        }
         // A "soft 404": an image, script or font link answered with the
         // site's HTML page. Saving it is wrong, and following its relative
         // links nests paths ever deeper.
@@ -1112,7 +1370,11 @@ impl Crawler {
         let file = self.config.output_dir.join(path.to_path_buf());
 
         if !self.config.dry_run {
-            if let Err(error) = write_atomic(&file, &body).await {
+            let written = match &spilled {
+                Some(temp) => move_into_place(temp, &file).await,
+                None => write_atomic(&file, &body).await,
+            };
+            if let Err(error) = written {
                 let reason = format!("could not write {}: {error}", file.display());
                 return self.fail(state, &page, reason);
             }
@@ -1148,10 +1410,10 @@ impl Crawler {
                 .and_then(|v| v.to_str().ok()?.parse().ok())
                 .unwrap_or(0)
         } else {
-            body.len() as u64
+            size
         };
-        state.bytes += body.len() as u64;
-        if !page.head {
+        state.bytes += size;
+        if !page.head && spilled.is_none() {
             self.archive(
                 state,
                 &final_url,
@@ -1162,6 +1424,13 @@ impl Crawler {
                 &path,
             );
         }
+        let info = SavedInfo {
+            url: final_url.clone(),
+            path: file.clone(),
+            bytes,
+            mime: mime.clone(),
+            file_type,
+        };
         state.record(page.entry(EntryState::Saved(SavedFile {
             path,
             mime,
@@ -1174,6 +1443,36 @@ impl Crawler {
             path: file,
             bytes,
         });
+        self.hook(|hooks| hooks.on_file(&info));
+    }
+
+    /// The size limit the rules set for `kind`, if any.
+    fn type_limit(&self, kind: FileType) -> Option<u64> {
+        self.config
+            .type_limits
+            .iter()
+            .find(|(limited, _)| *limited == kind)
+            .map(|(_, limit)| *limit)
+    }
+
+    /// Reports a worker's download progress, at most a few times a second.
+    fn progress_sink(&self, worker: usize) -> ProgressSink {
+        let events = self.events.clone();
+        let last = std::sync::Mutex::new(Instant::now() - Duration::from_secs(1));
+        ProgressSink(Arc::new(move |received, total| {
+            let mut last = last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let done = total.is_some_and(|total| received >= total);
+            if done || last.elapsed() >= Duration::from_millis(150) {
+                *last = Instant::now();
+                let _ = events.send(CrawlEvent::Downloading {
+                    worker,
+                    received,
+                    total,
+                });
+            }
+        }))
     }
 
     /// Saves a response a browser requester captured while loading `parent`
@@ -1281,6 +1580,60 @@ impl Crawler {
         state.unchanged += 1;
         state.record(job.entry(EntryState::Saved(previous)));
         self.emit(CrawlEvent::Unchanged { url: job.url });
+    }
+
+    /// Smart slow-down for the host of `url` after an answer with `status`.
+    fn adapt(&self, state: &mut State, url: &Url, status: StatusCode) {
+        let key = robots::origin_key(url);
+        let host = url.host_str().unwrap_or_default().to_owned();
+        let current = state.adaptive_gap.get(&key).copied();
+        if matches!(status.as_u16(), 429 | 503) {
+            state.good_streak.remove(&key);
+            // Each URL slows its host once: retrying one page that is always
+            // busy must not keep doubling the gap for the whole site.
+            if !state.slowed_by.insert(url.clone()) {
+                return;
+            }
+            let base = current.unwrap_or(self.config.per_host_delay.max(ADAPTIVE_START / 2));
+            let gap = (base * 2).clamp(ADAPTIVE_START, ADAPTIVE_MAX);
+            if current != Some(gap) {
+                state.adaptive_gap.insert(key, gap);
+                // Requests not yet started wait at least one new gap.
+                state.delay_host(url, gap);
+                self.emit(CrawlEvent::Pace {
+                    host,
+                    gap,
+                    slower: true,
+                });
+            }
+        } else if status.is_success() || status.is_redirection() {
+            let Some(gap) = current else {
+                return;
+            };
+            let streak = state.good_streak.entry(key.clone()).or_default();
+            *streak += 1;
+            if *streak < ADAPTIVE_RECOVERY {
+                return;
+            }
+            *streak = 0;
+            let shorter = gap * 3 / 4;
+            if shorter <= self.config.per_host_delay || shorter < Duration::from_millis(50) {
+                state.adaptive_gap.remove(&key);
+                state.good_streak.remove(&key);
+                self.emit(CrawlEvent::Pace {
+                    host,
+                    gap: self.config.per_host_delay,
+                    slower: false,
+                });
+            } else {
+                state.adaptive_gap.insert(key, shorter);
+                self.emit(CrawlEvent::Pace {
+                    host,
+                    gap: shorter,
+                    slower: false,
+                });
+            }
+        }
     }
 
     fn retry(&self, state: &mut State, mut job: Job, after: Option<Duration>, reason: String) {
@@ -1521,6 +1874,7 @@ impl Crawler {
     }
 
     fn fail(&self, state: &mut State, job: &Job, reason: String) {
+        self.hook(|hooks| hooks.on_error(&job.url, &reason));
         state.record(job.entry(EntryState::Failed(reason.clone())));
         self.emit(CrawlEvent::Failed {
             url: job.url.clone(),
@@ -1614,6 +1968,12 @@ struct State {
     next_slot: HashMap<String, Deadline>,
     /// Per-origin gaps longer than the default, from `Crawl-delay`.
     host_gap: HashMap<String, Duration>,
+    /// Gaps set by the smart slow-down, by origin.
+    adaptive_gap: HashMap<String, Duration>,
+    /// Good answers in a row since the last change, by origin.
+    good_streak: HashMap<String, u32>,
+    /// URLs whose 429/503 already slowed their host down.
+    slowed_by: HashSet<Url>,
     robots: HashMap<String, RobotsSlot>,
     /// Saved files from the copy being updated.
     previous: HashMap<Url, SavedFile>,
@@ -1695,6 +2055,7 @@ impl State {
             .get(&key)
             .copied()
             .unwrap_or_default()
+            .max(self.adaptive_gap.get(&key).copied().unwrap_or_default())
             .max(default_gap);
         let now = Deadline::now();
         let slot = self
@@ -1836,6 +2197,28 @@ impl RateLimit {
             *next
         };
         tokio::time::sleep_until(until).await;
+    }
+}
+
+/// Inside the state folder: large downloads in progress, kept to resume.
+const PARTIAL_DIR: &str = "partial";
+
+/// Moves a downloaded file to its final name (copying across file systems).
+async fn move_into_place(temp: &Path, path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    if tokio::fs::rename(temp, path).await.is_err() {
+        tokio::fs::copy(temp, path).await?;
+        tokio::fs::remove_file(temp).await?;
+    }
+    Ok(())
+}
+
+/// Removes a downloaded file that won't be kept.
+async fn discard(temp: Option<&Path>) {
+    if let Some(temp) = temp {
+        let _ = tokio::fs::remove_file(temp).await;
     }
 }
 

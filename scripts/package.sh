@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the release binaries for this machine and packs them for
-# distribution: dist/mistercopy-<version>-<target>.tar.gz (.zip on Windows)
+# distribution: dist/amel-<version>-<target>.tar.gz (.zip on Windows)
 # plus a .sha256 checksum next to it.
 #
 #   scripts/package.sh                   # lean build
@@ -18,7 +18,7 @@ if [[ -n $features ]]; then
 fi
 cargo build "${build_args[@]}"
 
-name="mistercopy-$version-$target${features:+-$features}"
+name="amel-$version-$target${features:+-$features}"
 exe=""
 [[ $target == *windows* ]] && exe=".exe"
 
@@ -26,7 +26,7 @@ mkdir -p dist
 stage="dist/$name"
 rm -rf "$stage"
 mkdir "$stage"
-cp "target/release/mistercopy$exe" "target/release/mistercopy-gui$exe" README.md "$stage/"
+cp "target/release/amel$exe" "target/release/amel-gui$exe" README.md "$stage/"
 
 cd dist
 if [[ $target == *windows* ]]; then

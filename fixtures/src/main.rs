@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use clap::Parser;
 use mc_fixtures::{FixtureServer, Site};
 
-/// Serve a MisterCopy test site on localhost.
+/// Serve a Amel test site on localhost.
 #[derive(Parser)]
 #[command(name = "mc-fixtures")]
 struct Args {

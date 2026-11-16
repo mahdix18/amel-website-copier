@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 /// Saved next to each host's pages.
-pub const REPLAY_SCRIPT: &str = "mistercopy-replay.js";
+pub const REPLAY_SCRIPT: &str = "amel-replay.js";
 
 /// A single response larger than this isn't embedded.
 const MAX_ITEM_BYTES: usize = 1024 * 1024;
@@ -63,13 +63,13 @@ impl Manifest {
     pub(crate) fn script(&self) -> String {
         // `</script>` can't occur: the script is a separate file.
         let data = serde_json::to_string(&self.items).unwrap_or_else(|_| "{}".to_owned());
-        SHIM.replace("__MISTERCOPY_DATA__", &data)
+        SHIM.replace("__AMEL_DATA__", &data)
     }
 }
 
-const SHIM: &str = r#"// Written by MisterCopy. Answers this copy's own data requests offline.
+const SHIM: &str = r#"// Written by Amel. Answers this copy's own data requests offline.
 (() => {
-  const data = __MISTERCOPY_DATA__;
+  const data = __AMEL_DATA__;
   const keys = Object.keys(data);
   const find = (input) => {
     try {
@@ -94,11 +94,11 @@ const SHIM: &str = r#"// Written by MisterCopy. Answers this copy's own data req
   const open = XMLHttpRequest.prototype.open;
   const send = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-    this.__misterCopyHit = find(url);
+    this.__amelHit = find(url);
     return open.call(this, method, url, ...rest);
   };
   XMLHttpRequest.prototype.send = function (body) {
-    const hit = this.__misterCopyHit;
+    const hit = this.__amelHit;
     if (!hit) return send.call(this, body);
     for (const [name, value] of [["readyState", 4], ["status", 200], ["responseText", hit.body], ["response", hit.body]]) {
       Object.defineProperty(this, name, { value, configurable: true });

@@ -77,7 +77,7 @@ const BASIC_DOC: &str = "<!doctype html><title>Doc</title><h1>Basic document</h1
 
 async fn index() -> Html<&'static str> {
     Html(
-        r#"<!doctype html><title>MisterCopy fixture: auth</title>
+        r#"<!doctype html><title>Amel fixture: auth</title>
 <a href="/login">Log in</a> <a href="/members/">Members</a> <a href="/basic/">Basic</a>"#,
     )
 }

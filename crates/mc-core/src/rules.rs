@@ -63,16 +63,25 @@ pub enum SkipReason {
     Robots,
     /// Looks like a logout link, which would end the session.
     Logout,
+    /// A file type the rules leave out.
+    FileType,
+    /// Larger than the size limit for its file type.
+    TooBig,
+    /// A script hook said not to fetch it.
+    Script,
 }
 
 impl SkipReason {
-    pub const ALL: [SkipReason; 6] = [
+    pub const ALL: [SkipReason; 9] = [
         Self::Excluded,
         Self::OutOfScope,
         Self::TooDeep,
         Self::UrlLimit,
         Self::Robots,
         Self::Logout,
+        Self::FileType,
+        Self::TooBig,
+        Self::Script,
     ];
 
     /// A stable name for storage and reports.
@@ -84,6 +93,9 @@ impl SkipReason {
             Self::UrlLimit => "url-limit",
             Self::Robots => "robots",
             Self::Logout => "logout",
+            Self::FileType => "file-type",
+            Self::TooBig => "too-big",
+            Self::Script => "script",
         }
     }
 
@@ -101,6 +113,9 @@ impl std::fmt::Display for SkipReason {
             Self::UrlLimit => "URL limit reached",
             Self::Robots => "disallowed by robots.txt",
             Self::Logout => "looks like a logout link",
+            Self::FileType => "a file type left out by the rules",
+            Self::TooBig => "larger than the limit for its type",
+            Self::Script => "skipped by the script",
         })
     }
 }

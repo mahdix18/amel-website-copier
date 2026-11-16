@@ -63,7 +63,7 @@ pub fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            let skip = rel.starts_with(".mistercopy/") || rel.starts_with("mistercopy-report");
+            let skip = rel.starts_with(".amel/") || rel.starts_with("amel-report");
             (!skip).then(|| (rel, std::fs::read(&path).unwrap()))
         })
         .collect()

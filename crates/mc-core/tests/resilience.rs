@@ -37,7 +37,7 @@ fn tree(dir: &Path) -> BTreeMap<String, Vec<u8>> {
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            if rel.starts_with(".mistercopy") || rel.starts_with("mistercopy-report") {
+            if rel.starts_with(".amel") || rel.starts_with("amel-report") {
                 continue;
             }
             if path.is_dir() {
@@ -654,4 +654,100 @@ async fn retry_failed_fetches_only_what_failed() {
     // The start page now links to the recovered file locally.
     let index = std::fs::read_to_string(out.path().join("site.test/index.html")).unwrap();
     assert!(index.contains(r#"href="flaky.html""#), "{index}");
+}
+
+#[tokio::test]
+async fn smart_slow_down_backs_off_on_429_and_recovers() {
+    let links: String = (0..12)
+        .map(|i| format!(r#"<a href="/p{i}">p</a>"#))
+        .collect();
+    let mut requester = MockRequester::new()
+        .route(url("https://site.test/"), MockRoute::html(links))
+        .route(
+            url("https://site.test/robots.txt"),
+            MockRoute::status(StatusCode::NOT_FOUND, ""),
+        )
+        // Busy once, without a Retry-After.
+        .route_sequence(
+            url("https://site.test/p0"),
+            vec![
+                MockRoute::status(StatusCode::TOO_MANY_REQUESTS, "slow down"),
+                MockRoute::html("ok"),
+            ],
+        );
+    for i in 1..12 {
+        requester = requester.route(
+            url(&format!("https://site.test/p{i}")),
+            MockRoute::html("x"),
+        );
+    }
+    let out = tempfile::tempdir().unwrap();
+    let mut config = config(out.path());
+    config.concurrency = 1;
+    config.adaptive = true;
+    let crawler = Crawler::new(config, Arc::new(requester));
+    let mut events = crawler.subscribe();
+    let started = std::time::Instant::now();
+    let summary = crawler.run().await.unwrap();
+    let elapsed = started.elapsed();
+    assert!(summary.failed.is_empty(), "{:?}", summary.failed);
+
+    let mut paces = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let CrawlEvent::Pace { gap, slower, .. } = event {
+            paces.push((gap, slower));
+        }
+    }
+    assert_eq!(
+        paces.first(),
+        Some(&(Duration::from_millis(500), true)),
+        "{paces:?}"
+    );
+    assert!(
+        paces
+            .iter()
+            .any(|(gap, slower)| !slower && *gap < Duration::from_millis(500)),
+        "ten good answers speed it up again: {paces:?}"
+    );
+    // The requests after the 429 were spaced out (about ten at 0.5 s).
+    assert!(elapsed >= Duration::from_secs(4), "{elapsed:?}");
+
+    // A page that is always busy slows its host only once, however often
+    // it is retried.
+    let out = tempfile::tempdir().unwrap();
+    let busy = MockRequester::new()
+        .route(
+            url("https://site.test/"),
+            MockRoute::html(r#"<a href="/busy">b</a>"#),
+        )
+        .route(
+            url("https://site.test/robots.txt"),
+            MockRoute::status(StatusCode::NOT_FOUND, ""),
+        )
+        .route(
+            url("https://site.test/busy"),
+            MockRoute::status(StatusCode::SERVICE_UNAVAILABLE, "busy"),
+        );
+    let mut busy_config = self::config(out.path());
+    busy_config.adaptive = true;
+    busy_config.max_retries = 3;
+    let crawler = Crawler::new(busy_config, Arc::new(busy));
+    let mut events = crawler.subscribe();
+    crawler.run().await.unwrap();
+    let mut slower = 0;
+    while let Ok(event) = events.try_recv() {
+        if let CrawlEvent::Pace { slower: true, .. } = event {
+            slower += 1;
+        }
+    }
+    assert_eq!(slower, 1, "four 503s from one URL");
+
+    // Off, nothing changes the pace.
+    let out = tempfile::tempdir().unwrap();
+    let crawler = Crawler::new(self::config(out.path()), Arc::new(flaky_site()));
+    let mut events = crawler.subscribe();
+    crawler.run().await.unwrap();
+    while let Ok(event) = events.try_recv() {
+        assert!(!matches!(event, CrawlEvent::Pace { .. }));
+    }
 }

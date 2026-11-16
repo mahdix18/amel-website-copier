@@ -1,6 +1,6 @@
 [package]
 name = "mc-store"
-description = "SQLite persistence for MisterCopy crawls, for resume and update"
+description = "SQLite persistence for Amel crawls, for resume and update"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

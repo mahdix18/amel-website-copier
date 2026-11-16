@@ -1,6 +1,6 @@
 [package]
 name = "mc-requester-playwright"
-description = "MisterCopy requester that renders pages in Chromium through Playwright"
+description = "Amel requester that renders pages in Chromium through Playwright"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

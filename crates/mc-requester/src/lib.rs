@@ -1,4 +1,4 @@
-//! The fetch abstraction behind MisterCopy.
+//! The fetch abstraction behind Amel.
 //!
 //! The crawler never talks to an HTTP client or a browser directly. It hands a
 //! [`FetchRequest`] to a [`Requester`] and gets back a [`FetchResponse`]. Each
@@ -30,7 +30,8 @@ pub use proxy::{
 pub use registry::{RegistryError, RequesterInfo, RequesterRegistry};
 pub use requester::{BuildError, Capabilities, Requester, RequesterFactory, SharedResources};
 pub use types::{
-    Body, CapturedResponse, FetchContext, FetchRequest, FetchResponse, Redirect, Validators,
+    Body, CapturedResponse, FetchContext, FetchRequest, FetchResponse, ProgressSink, Redirect,
+    Validators,
 };
 
 // Re-exported so requester crates and the crawler agree on one version.

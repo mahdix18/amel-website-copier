@@ -43,8 +43,8 @@ async fn copy(site: Site) -> (tempfile::TempDir, PathBuf, CrawlSummary) {
     (out, root, summary)
 }
 
-async fn mistercopy(args: &[&str]) -> Output {
-    tokio::process::Command::new(env!("CARGO_BIN_EXE_mistercopy"))
+async fn amel(args: &[&str]) -> Output {
+    tokio::process::Command::new(env!("CARGO_BIN_EXE_amel"))
         .args(args)
         .output()
         .await
@@ -172,7 +172,7 @@ async fn cli_copies_and_reports_exit_codes() {
     let dir = out.path().to_str().unwrap();
     let url = server.base_url();
 
-    let first = mistercopy(&[
+    let first = amel(&[
         "copy",
         url.as_str(),
         "--delay-ms",
@@ -194,7 +194,7 @@ async fn cli_copies_and_reports_exit_codes() {
     );
 
     // A finished copy isn't overwritten by accident.
-    let again = mistercopy(&[
+    let again = amel(&[
         "copy",
         url.as_str(),
         "--delay-ms",
@@ -205,8 +205,8 @@ async fn cli_copies_and_reports_exit_codes() {
     ])
     .await;
     assert_eq!(again.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&again.stderr).contains("mistercopy update"));
-    let fresh = mistercopy(&[
+    assert!(String::from_utf8_lossy(&again.stderr).contains("amel update"));
+    let fresh = amel(&[
         "copy",
         url.as_str(),
         "--delay-ms",
@@ -219,12 +219,11 @@ async fn cli_copies_and_reports_exit_codes() {
     .await;
     assert!(fresh.status.success());
 
-    let bad_regex =
-        mistercopy(&["copy", url.as_str(), "--exclude", "(", "--fresh", "-o", dir]).await;
+    let bad_regex = amel(&["copy", url.as_str(), "--exclude", "(", "--fresh", "-o", dir]).await;
     assert_eq!(bad_regex.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&bad_regex.stderr).contains("invalid regex"));
 
-    let bad_profile = mistercopy(&[
+    let bad_profile = amel(&[
         "copy",
         url.as_str(),
         "--profile",
@@ -236,7 +235,7 @@ async fn cli_copies_and_reports_exit_codes() {
     .await;
     assert_eq!(bad_profile.status.code(), Some(2));
 
-    let bad_auth = mistercopy(&[
+    let bad_auth = amel(&[
         "copy",
         url.as_str(),
         "--auth",
@@ -248,7 +247,7 @@ async fn cli_copies_and_reports_exit_codes() {
     .await;
     assert_eq!(bad_auth.status.code(), Some(2));
 
-    let listed = mistercopy(&["requesters", "list"]).await;
+    let listed = amel(&["requesters", "list"]).await;
     assert!(String::from_utf8_lossy(&listed.stdout).contains("wreq"));
     server.stop().await.unwrap();
 }
@@ -261,7 +260,7 @@ async fn cli_resumes_and_updates() {
     let url = server.base_url();
 
     // A zero time limit stops before the first request.
-    let stopped = mistercopy(&[
+    let stopped = amel(&[
         "copy",
         url.as_str(),
         "--delay-ms",
@@ -278,16 +277,16 @@ async fn cli_resumes_and_updates() {
         "{}",
         String::from_utf8_lossy(&stopped.stderr)
     );
-    assert!(String::from_utf8_lossy(&stopped.stderr).contains("mistercopy resume"));
-    let update_too_early = mistercopy(&["update", dir]).await;
+    assert!(String::from_utf8_lossy(&stopped.stderr).contains("amel resume"));
+    let update_too_early = amel(&["update", dir]).await;
     assert_eq!(update_too_early.status.code(), Some(2));
 
     // Saved options, limits included, apply to every run: a zero time
     // limit stops the resumed run too.
-    let resumed = mistercopy(&["resume", dir]).await;
+    let resumed = amel(&["resume", dir]).await;
     assert_eq!(resumed.status.code(), Some(3));
 
-    let finished = mistercopy(&[
+    let finished = amel(&[
         "copy",
         url.as_str(),
         "--delay-ms",
@@ -299,11 +298,11 @@ async fn cli_resumes_and_updates() {
     ])
     .await;
     assert!(finished.status.success());
-    let done = mistercopy(&["resume", dir]).await;
+    let done = amel(&["resume", dir]).await;
     assert!(done.status.success());
     assert!(String::from_utf8_lossy(&done.stdout).contains("already complete"));
 
-    let updated = mistercopy(&["update", dir]).await;
+    let updated = amel(&["update", dir]).await;
     let stdout = String::from_utf8_lossy(&updated.stdout);
     assert!(
         updated.status.success(),
@@ -314,7 +313,7 @@ async fn cli_resumes_and_updates() {
     assert!(stdout.contains("unchanged"), "{stdout}");
     assert_links_resolve_offline(&host_dir(out.path(), server.addr().port()), true);
 
-    let missing = mistercopy(&["resume", out.path().join("nowhere").to_str().unwrap()]).await;
+    let missing = amel(&["resume", out.path().join("nowhere").to_str().unwrap()]).await;
     assert_eq!(missing.status.code(), Some(2));
     server.stop().await.unwrap();
 }
@@ -324,7 +323,7 @@ async fn cli_scan_saves_only_the_report() {
     let server = FixtureServer::start(Site::StaticBlog).await.unwrap();
     let out = tempfile::tempdir().unwrap();
     let report = out.path().join("scan.json");
-    let scanned = mistercopy(&[
+    let scanned = amel(&[
         "scan",
         server.base_url().as_str(),
         "--delay-ms",
@@ -347,12 +346,44 @@ async fn cli_scan_saves_only_the_report() {
 }
 
 #[tokio::test]
+async fn cli_writes_a_log_file() {
+    let server = FixtureServer::start(Site::StaticBlog).await.unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let log = out.path().join("logs/copy.log");
+    let copied = amel(&[
+        "copy",
+        server.base_url().as_str(),
+        "--output",
+        out.path().join("site").to_str().unwrap(),
+        "--delay-ms",
+        "0",
+        "--quiet",
+        "--log-file",
+        log.to_str().unwrap(),
+    ])
+    .await;
+    assert!(
+        copied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&copied.stderr)
+    );
+    let text = std::fs::read_to_string(&log).unwrap();
+    let saved: Vec<&str> = text.lines().filter(|l| l.contains(" saved ")).collect();
+    assert!(saved.len() >= 10, "{text}");
+    // `2026-11-16 17:20:01.123 INFO  copy    saved http://…`
+    let line = saved[0];
+    assert_eq!(line.as_bytes()[4], b'-', "{line}");
+    assert!(line[24..].starts_with("INFO  copy    saved http://"), "{line}");
+    server.stop().await.unwrap();
+}
+
+#[tokio::test]
 async fn cli_writes_warc_and_zip() {
     let server = FixtureServer::start(Site::StaticBlog).await.unwrap();
     let out = tempfile::tempdir().unwrap();
     let dir = out.path().join("copy");
     let warc = out.path().join("blog.warc.gz");
-    let copied = mistercopy(&[
+    let copied = amel(&[
         "copy",
         server.base_url().as_str(),
         "--delay-ms",

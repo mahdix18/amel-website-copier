@@ -370,3 +370,156 @@ async fn rate_limit_slows_downloads() {
         started.elapsed()
     );
 }
+
+fn typed_site() -> MockRequester {
+    MockRequester::new()
+        .route(
+            url("https://site.test/"),
+            MockRoute::html(
+                r#"<a href="/clip.mp4">v</a> <a href="/photo.png">p</a> <a href="/big.png">b</a>
+                   <a href="/page">page</a> <a href="/cgi">cgi</a>"#,
+            ),
+        )
+        .route(
+            url("https://site.test/clip.mp4"),
+            MockRoute::respond(StatusCode::OK, "video/mp4", "MP4"),
+        )
+        .route(
+            url("https://site.test/photo.png"),
+            MockRoute::respond(StatusCode::OK, "image/png", "PNG"),
+        )
+        .route(
+            url("https://site.test/big.png"),
+            MockRoute::respond(StatusCode::OK, "image/png", vec![0u8; 5000]),
+        )
+        .route(
+            url("https://site.test/page"),
+            MockRoute::html("<p>page</p>"),
+        )
+        // No extension: only the answer says it is a video.
+        .route(
+            url("https://site.test/cgi"),
+            MockRoute::respond(StatusCode::OK, "video/webm", "WEBM"),
+        )
+}
+
+#[tokio::test]
+async fn file_type_rules_skip_types_and_cap_sizes() {
+    let out = tempfile::tempdir().unwrap();
+    let requester = Arc::new(typed_site());
+    let mut config = config(out.path());
+    config.respect_robots = false;
+    config.skip_types = vec![mc_core::FileType::Video];
+    config.type_limits = vec![(mc_core::FileType::Image, 1000)];
+    let crawler = Crawler::new(config, requester.clone());
+    let mut events = crawler.subscribe();
+    let summary = crawler.run().await.unwrap();
+
+    let calls: Vec<String> = page_calls(&requester)
+        .iter()
+        .map(|u| u.path().to_owned())
+        .collect();
+    assert!(
+        !calls.contains(&"/clip.mp4".to_owned()),
+        "skipped before downloading: {calls:?}"
+    );
+    assert!(out.path().join("site.test/photo.png").is_file());
+    assert!(
+        !out.path().join("site.test/big.png").exists(),
+        "over the image limit"
+    );
+    assert!(
+        !out.path().join("site.test/cgi").exists()
+            && !out.path().join("site.test/cgi.webm").exists()
+    );
+    assert!(out.path().join("site.test/page.html").is_file());
+    assert!(summary.failed.is_empty(), "{:?}", summary.failed);
+    let mut skipped = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let CrawlEvent::Skipped { url, reason } = event {
+            skipped.push((url.path().to_owned(), reason.as_str()));
+        }
+    }
+    skipped.sort();
+    assert_eq!(
+        skipped,
+        [
+            ("/big.png".to_owned(), "too-big"),
+            ("/cgi".to_owned(), "file-type"),
+            ("/clip.mp4".to_owned(), "file-type")
+        ],
+        "the 5 kB image is over the image limit; the videos are left out"
+    );
+}
+
+struct Recorder {
+    seen: std::sync::Mutex<Vec<String>>,
+    logs: std::sync::Mutex<Vec<String>>,
+}
+
+impl mc_core::Hooks for Recorder {
+    fn on_start(&self, seeds: &[Url], _: &std::path::Path) {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("start {}", seeds[0]));
+        self.logs
+            .lock()
+            .unwrap()
+            .push("hello from the hook".to_owned());
+    }
+    fn should_fetch(&self, url: &Url, _: mc_core::LinkKind) -> bool {
+        url.path() != "/photo.png"
+    }
+    fn on_file(&self, file: &mc_core::SavedInfo) {
+        self.seen.lock().unwrap().push(format!(
+            "file {} {}",
+            file.url.path(),
+            file.file_type.as_str()
+        ));
+    }
+    fn on_finish(&self, summary: &mc_core::CrawlSummary) {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("finish {}", summary.saved));
+    }
+    fn take_logs(&self) -> Vec<String> {
+        std::mem::take(&mut self.logs.lock().unwrap())
+    }
+}
+
+#[tokio::test]
+async fn hooks_see_the_crawl_and_can_skip() {
+    let out = tempfile::tempdir().unwrap();
+    let mut config = config(out.path());
+    config.respect_robots = false;
+    let hooks = Arc::new(Recorder {
+        seen: std::sync::Mutex::new(Vec::new()),
+        logs: std::sync::Mutex::new(Vec::new()),
+    });
+    let crawler = Crawler::new(config, Arc::new(typed_site())).with_hooks(hooks.clone());
+    let mut events = crawler.subscribe();
+    let summary = crawler.run().await.unwrap();
+    let seen = hooks.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen.first().map(String::as_str),
+        Some("start https://site.test/")
+    );
+    assert!(
+        seen.contains(&"file /clip.mp4 video".to_owned()),
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|s| s.contains("photo.png")),
+        "skipped by the hook"
+    );
+    assert_eq!(seen.last(), Some(&format!("finish {}", summary.saved)));
+    let mut logs = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let CrawlEvent::ScriptLog { message } = event {
+            logs.push(message);
+        }
+    }
+    assert_eq!(logs, ["hello from the hook"]);
+}
