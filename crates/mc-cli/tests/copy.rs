@@ -373,7 +373,10 @@ async fn cli_writes_a_log_file() {
     // `2026-11-16 17:20:01.123 INFO  copy    saved http://…`
     let line = saved[0];
     assert_eq!(line.as_bytes()[4], b'-', "{line}");
-    assert!(line[24..].starts_with("INFO  copy    saved http://"), "{line}");
+    assert!(
+        line[24..].starts_with("INFO  copy    saved http://"),
+        "{line}"
+    );
     server.stop().await.unwrap();
 }
 

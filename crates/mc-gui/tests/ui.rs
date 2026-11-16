@@ -671,3 +671,41 @@ fn the_log_panel_records_filters_and_clears(cx: &mut TestAppContext) {
     let prefs = std::fs::read_to_string(config.path().join("prefs.json")).unwrap();
     assert!(prefs.contains("\"console_open\": true"), "{prefs}");
 }
+
+#[gpui_kit::test]
+fn ctrl_space_shows_script_suggestions(cx: &mut TestAppContext) {
+    let config = tempfile::tempdir().unwrap();
+    let (handle, view) = open_sized(cx, config.path(), 1180., 900.);
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("tab-script", cx);
+        let editor = view.read(cx).script_editor().clone();
+        editor.update(cx, |editor, cx| {
+            editor.set_value("function onFile(file) {\n  \n}", window, cx);
+            editor.focus(window, cx);
+        });
+        window.render_frame(cx);
+    })
+    .unwrap();
+    // On the blank line: every hook and keyword.
+    cx.update_window(handle.into(), |_, window, cx| {
+        let editor = view.read(cx).script_editor().clone();
+        editor.update(cx, |editor, cx| {
+            editor.set_cursor_position(gpui_kit::component::input::Position::new(1, 2), window, cx)
+        });
+        window.press("ctrl-space", cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let labels = cx.update(|cx| {
+        let editor = view.read(cx).script_editor().read(cx);
+        let menu = editor.completion_menu_state();
+        assert!(menu.open, "Ctrl+Space opens the suggestions");
+        menu.items
+            .iter()
+            .map(|item| item.label.clone())
+            .collect::<Vec<_>>()
+    });
+    assert!(labels.contains(&"onStart".to_owned()), "{labels:?}");
+    assert!(labels.contains(&"log".to_owned()), "{labels:?}");
+}

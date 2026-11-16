@@ -105,9 +105,7 @@ impl ScriptCompletion {
                 })
                 .collect();
         }
-        if word.is_empty() {
-            return Vec::new();
-        }
+        // Nothing typed (Ctrl+Space on a blank spot): everything.
         let lower = word.to_lowercase();
         let hooks = HOOKS
             .iter()
@@ -122,7 +120,7 @@ impl ScriptCompletion {
             });
         let keywords = KEYWORDS
             .iter()
-            .filter(|keyword| keyword.starts_with(word) && **keyword != word)
+            .filter(|keyword| keyword.starts_with(word) && (word.is_empty() || **keyword != word))
             .map(|keyword| CompletionItem {
                 label: (*keyword).to_owned(),
                 kind: Some(CompletionItemKind::KEYWORD),
@@ -169,6 +167,9 @@ mod tests {
     #[test]
     fn completes_hooks_fields_and_keywords() {
         assert_eq!(labels("on"), ["onStart", "onFile", "onError", "onFinish"]);
+        let all = labels("  ");
+        assert!(all.len() > 20 && all[0] == "onStart", "{all:?}");
+        assert!(all.contains(&"log".to_owned()) && all.contains(&"return".to_owned()));
         assert_eq!(labels("function should"), ["shouldFetch"]);
         assert_eq!(labels("  if (file.by"), ["bytes"]);
         assert_eq!(
@@ -176,7 +177,7 @@ mod tests {
             ["saved", "failed", "skipped", "bytes", "seconds", "stopped"]
         );
         assert_eq!(labels("ret"), ["return"]);
-        assert!(labels("x = ").is_empty());
+        assert_eq!(labels("x = ").len(), all.len(), "nothing typed: everything");
         let on_file = ScriptCompletion::suggest("onF", 3)
             .into_iter()
             .find(|item| item.label == "onFile")

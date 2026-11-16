@@ -9,7 +9,7 @@ use std::time::Duration;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::{
-    Editor, EditorState, Input, InputEvent, InputState, Textarea, TextareaState,
+    Editor, EditorState, Input, InputEvent, InputState, ShowCompletions, Textarea, TextareaState,
 };
 use gpui_kit::component::scroll::ScrollableElement;
 use gpui_kit::component::switch::Switch;
@@ -62,6 +62,12 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-k", TogglePalette, None),
         KeyBinding::new("ctrl-`", ToggleConsole, None),
         KeyBinding::new("cmd-`", ToggleConsole, None),
+        // The script editor's suggestions, as in most code editors.
+        KeyBinding::new(
+            "ctrl-space",
+            ShowCompletions,
+            Some("Input && mode == editor"),
+        ),
     ]);
 }
 
@@ -510,6 +516,10 @@ impl CopyWindow {
 
     pub fn output_input(&self) -> &Entity<InputState> {
         &self.output
+    }
+
+    pub fn script_editor(&self) -> &Entity<EditorState> {
+        &self.fields.script
     }
 
     fn text(input: &Entity<InputState>, cx: &Context<Self>) -> String {
