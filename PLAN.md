@@ -399,6 +399,16 @@ MisterCopy does not solve CAPTCHAs or interactive challenges, and the docs say u
   - The mini window first opened clipped to a 30 px slice on GNOME, because gpui-kit's client-side frame keeps 21 px per side for its shadow and border. It now measures that frame on its first frame and grows to fit (402×116 for 360×74 of content); checked by capture on GNOME. `--mini` opens straight into it.
   - Not checked: dragging the mini window (the nested server has no window manager to honour the move), and where it opens and whether it stays on top under Wayland, which GNOME decides.
 
+- **Retrying failures (2026-11-16):**
+  - `CrawlConfig::retry_failed` re-queues a stored copy's failed URLs (whatever the reason) when it is continued.
+  - `mistercopy retry DIR` uses it, and so does a **Retry N failed** button in the app's request bar after a copy with failures. Only the failures are fetched; pages are rewritten so recovered files link locally.
+  - Per-request retries can now be set: `--retry-delay-ms` in the CLI, and **Retries per file** and **Wait before retrying** in the app's Limits tab.
+  - Checked:
+    - an engine test (only the failures are requested again; the 404 stays failed; the start page links the recovered file)
+    - CLI tests against the hostile fixture's `/rate-limited` (recovered on the second `retry`) and a clean copy ("nothing to retry")
+    - a UI test that fails a whole copy with a 0 MB file limit, lifts it and retries
+  - The UI test also moved the button: in the progress panel's tab row it could be pushed out of view.
+
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.
 - **Playwright from Rust** still needs the Playwright driver plus Chromium (about 150 MB+ downloaded on demand). If that proves painful, `chromiumoxide` (pure-Rust CDP) is the drop-in alternative requester. The trait makes the swap cheap.

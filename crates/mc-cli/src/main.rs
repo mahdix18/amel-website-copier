@@ -30,6 +30,8 @@ enum Command {
     Resume(copy::DirArgs),
     /// Refresh a finished copy, downloading only what changed.
     Update(copy::DirArgs),
+    /// Fetch again what failed in an earlier copy, without copying the rest again.
+    Retry(copy::DirArgs),
     /// Crawl and report broken links and assets without saving anything.
     Scan(copy::ScanArgs),
     /// Inspect the fetch backends included in this build.
@@ -173,6 +175,7 @@ async fn main() -> ExitCode {
         Command::Copy(args) => copy::copy(args, &registry()).await,
         Command::Resume(args) => copy::resume(args, &registry()).await,
         Command::Update(args) => copy::update(args, &registry()).await,
+        Command::Retry(args) => copy::retry(args, &registry()).await,
         Command::Scan(args) => copy::scan(args, &registry()).await,
         Command::Requesters {
             command: RequestersCommand::List { json },

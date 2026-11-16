@@ -45,6 +45,11 @@ pub struct CrawlOptions {
     #[arg(long, default_value_t = 3)]
     pub retries: u32,
 
+    /// Wait before the first retry, in milliseconds; each further retry
+    /// waits about twice as long (a server's Retry-After wins).
+    #[arg(long, value_name = "MS", default_value_t = 1000)]
+    pub retry_delay_ms: u64,
+
     /// Seconds before a request is abandoned.
     #[arg(long, default_value_t = 30)]
     pub timeout_secs: u64,
@@ -226,6 +231,7 @@ impl CrawlOptions {
         config.concurrency = self.concurrency;
         config.per_host_delay = Duration::from_millis(self.delay_ms);
         config.max_retries = self.retries;
+        config.retry_base_delay = Duration::from_millis(self.retry_delay_ms);
         config.respect_robots = !self.ignore_robots;
         config.warc = self.warc.clone();
         config.replay = self.replay;

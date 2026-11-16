@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use mc_cli::requesters::build_requester;
 use mc_core::{
-    CrawlEvent, CrawlStatus, CrawlSummary, Crawler, REPORT_HTML, REPORT_JSON, StopHandle,
-    human_bytes,
+    CrawlEvent, CrawlStatus, CrawlSummary, Crawler, EntryState, REPORT_HTML, REPORT_JSON,
+    StateStore, StopHandle, human_bytes,
 };
 use mc_requester::{RequesterRegistry, Url};
 use mc_store::SqliteStore;
@@ -146,6 +146,7 @@ pub async fn copy(args: CopyArgs, registry: &RequesterRegistry) -> ExitCode {
         options: args.options,
         session: args.session,
         quiet: args.quiet,
+        retry_failed: false,
     };
     run.execute(registry, Some(store)).await
 }
@@ -169,6 +170,44 @@ pub async fn resume(args: DirArgs, registry: &RequesterRegistry) -> ExitCode {
         options,
         session: args.session,
         quiet: args.quiet,
+        retry_failed: false,
+    };
+    run.execute(registry, Some(store)).await
+}
+
+/// Fetches again what failed in an earlier copy (and anything still queued),
+/// without downloading the rest again.
+pub async fn retry(args: DirArgs, registry: &RequesterRegistry) -> ExitCode {
+    let (mut store, seed, options) = match open_existing(&args.dir) {
+        Ok(found) => found,
+        Err(message) => return usage_error(&message),
+    };
+    let failed = match StateStore::load(&mut store) {
+        Ok(stored) => stored
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.state, EntryState::Failed(_)))
+            .count(),
+        Err(error) => return usage_error(&error.to_string()),
+    };
+    let complete = matches!(store.status(), Ok(Some(CrawlStatus::Complete)));
+    if failed == 0 && complete {
+        println!(
+            "Nothing failed in {}; nothing to retry.",
+            args.dir.display()
+        );
+        return ExitCode::SUCCESS;
+    }
+    if !args.quiet {
+        println!("Retrying {failed} failed URLs.");
+    }
+    let run = Run {
+        seed,
+        output: args.dir,
+        options,
+        session: args.session,
+        quiet: args.quiet,
+        retry_failed: true,
     };
     run.execute(registry, Some(store)).await
 }
@@ -198,6 +237,7 @@ pub async fn update(args: DirArgs, registry: &RequesterRegistry) -> ExitCode {
         options,
         session: args.session,
         quiet: args.quiet,
+        retry_failed: false,
     };
     run.execute(registry, Some(store)).await
 }
@@ -210,6 +250,7 @@ pub async fn scan(args: ScanArgs, registry: &RequesterRegistry) -> ExitCode {
         options: args.options,
         session: args.session,
         quiet: args.quiet,
+        retry_failed: false,
     };
     let (code, summary) = run.crawl(registry, None, true).await;
     if let (Some(summary), Some(path)) = (summary, report_path) {
@@ -266,6 +307,8 @@ struct Run {
     options: CrawlOptions,
     session: SessionArgs,
     quiet: bool,
+    /// Fetch again the URLs that failed in the stored copy.
+    retry_failed: bool,
 }
 
 impl Run {
@@ -307,6 +350,7 @@ impl Run {
             Err(message) => return (usage_error(&message), None),
         };
         config.dry_run = dry_run;
+        config.retry_failed = self.retry_failed;
         let shared = match self.options.shared_resources() {
             Ok(shared) => shared,
             Err(message) => return (usage_error(&message), None),

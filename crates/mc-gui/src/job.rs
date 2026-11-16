@@ -82,6 +82,12 @@ pub struct Settings {
     pub verify: bool,
     /// Re-check a finished copy instead of starting over.
     pub update: bool,
+    /// Continue the copy in the folder, fetching again what failed.
+    pub retry_failed: bool,
+    /// Retries per URL during the copy.
+    pub retries: String,
+    /// Seconds before the first retry; later ones wait about twice as long.
+    pub retry_delay_secs: String,
 }
 
 impl Default for Settings {
@@ -120,6 +126,9 @@ impl Default for Settings {
             replay: false,
             verify: true,
             update: false,
+            retry_failed: false,
+            retries: "3".to_owned(),
+            retry_delay_secs: "1".to_owned(),
         }
     }
 }
@@ -180,6 +189,18 @@ impl Settings {
             verify: self.verify,
             ..CrawlOptions::default()
         };
+        if let Some(retries) = number::<u32>(&self.retries, "Retries")? {
+            options.retries = retries.min(20);
+        }
+        let delay = self.retry_delay_secs.trim();
+        if !delay.is_empty() {
+            let secs: f64 = delay
+                .parse()
+                .ok()
+                .filter(|s: &f64| s.is_finite() && *s >= 0.0)
+                .ok_or_else(|| format!("Wait before retrying must be seconds, not “{delay}”."))?;
+            options.retry_delay_ms = (secs * 1000.0).round() as u64;
+        }
         if let Some(mb) = number(&self.max_file_mb, "Skip files over (MB)")? {
             options.max_file_mb = mb;
         }
@@ -487,7 +508,11 @@ pub fn start(settings: &Settings) -> Result<Running, String> {
     );
     let complete = matches!(store.status(), Ok(Some(CrawlStatus::Complete)));
     let resumed = same_site && unfinished;
-    if settings.update {
+    if settings.retry_failed {
+        if !same_site {
+            return Err("There is no copy of this site in that folder to retry.".to_owned());
+        }
+    } else if settings.update {
         if !(same_site && complete) {
             return Err(
                 "Only a finished copy of this site can be updated. Copy it first.".to_owned(),
@@ -506,6 +531,7 @@ pub fn start(settings: &Settings) -> Result<Running, String> {
         .set_meta(META_OPTIONS, &saved)
         .map_err(|e| e.to_string())?;
 
+    config.retry_failed = settings.retry_failed;
     let workers = config.concurrency;
     let zip = options.zip;
     let crawler = Crawler::new(config, requester).with_store(store);
@@ -638,6 +664,11 @@ impl Progress {
             progress.info("Continuing the unfinished copy of this site.");
         }
         progress
+    }
+
+    /// Adds an information line to the log.
+    pub fn note(&mut self, text: &str) {
+        self.info(text);
     }
 
     /// Notes a problem in the log without changing the phase.
@@ -972,6 +1003,29 @@ mod tests {
             form.options(&seed, Path::new("/out"))
                 .unwrap_err()
                 .contains("unknown browser profile")
+        );
+    }
+
+    #[test]
+    fn reads_the_retry_fields() {
+        let seed = Url::parse("https://s.test/").unwrap();
+        let mut form = Settings {
+            retries: "5".to_owned(),
+            retry_delay_secs: "2.5".to_owned(),
+            ..settings("https://s.test/", "/out")
+        };
+        let (options, _) = form.options(&seed, Path::new("/out")).unwrap();
+        assert_eq!((options.retries, options.retry_delay_ms), (5, 2500));
+        form.retries = "99".to_owned();
+        assert_eq!(
+            form.options(&seed, Path::new("/out")).unwrap().0.retries,
+            20
+        );
+        form.retry_delay_secs = "soon".to_owned();
+        assert!(
+            form.options(&seed, Path::new("/out"))
+                .unwrap_err()
+                .contains("Wait before retrying")
         );
     }
 

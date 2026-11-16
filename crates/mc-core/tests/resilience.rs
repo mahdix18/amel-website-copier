@@ -613,3 +613,45 @@ async fn pauses_and_resumes() {
     assert_eq!(summary.saved, 7, "everything is copied after resuming");
     assert!(summary.stopped.is_none());
 }
+
+#[tokio::test]
+async fn retry_failed_fetches_only_what_failed() {
+    let out = tempfile::tempdir().unwrap();
+    let store = MemoryStore::new();
+    let mut first = config(out.path());
+    first.max_retries = 0;
+    let requester = Arc::new(flaky_site());
+    let summary = Crawler::new(first, requester.clone())
+        .with_store(store.clone())
+        .run()
+        .await
+        .unwrap();
+    assert_eq!(summary.failed.len(), 2, "{:?}", summary.failed);
+    let before = requester.calls().len();
+
+    let mut again = config(out.path());
+    again.max_retries = 0;
+    again.retry_failed = true;
+    let summary = Crawler::new(again, requester.clone())
+        .with_store(store.clone())
+        .run()
+        .await
+        .unwrap();
+    let retried: Vec<_> = requester.calls()[before..]
+        .iter()
+        .map(|u| u.path().to_owned())
+        .filter(|path| path != "/robots.txt")
+        .collect();
+    let mut sorted = retried.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        ["/flaky.html", "/gone.html"],
+        "only the failures are asked again"
+    );
+    assert_eq!(summary.failed.len(), 1, "the 404 is still a 404");
+    assert!(out.path().join("site.test/flaky.html").is_file());
+    // The start page now links to the recovered file locally.
+    let index = std::fs::read_to_string(out.path().join("site.test/index.html")).unwrap();
+    assert!(index.contains(r#"href="flaky.html""#), "{index}");
+}

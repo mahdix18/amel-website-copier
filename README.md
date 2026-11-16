@@ -45,6 +45,10 @@ mistercopy update ./copies   # re-check every file; unchanged ones aren't downlo
 ```
 
 ```bash
+mistercopy retry ./copies    # fetch again only what failed; the rest is kept
+```
+
+```bash
 mistercopy scan https://example.com --report links.html   # audit only, saves nothing else
 ```
 
@@ -92,6 +96,7 @@ The window is laid out like an API client, in a dark theme (a light one is a cli
 - **Options**: the folder (`~/MisterCopy Copies` unless you pick another), **Parallel downloads** (1–32 workers) and **Speed**: *Polite* (1 request per second per site), *Balanced* (4 per second) or *Fast* (no gap, all workers at once). There are also switches for robots.txt and JavaScript.
 - **Browser**: which browser to impersonate (Chrome, Edge, Opera, Firefox, Safari or OkHttp), its version (‹ › steps through about 150 profiles), and the platform it claims (Auto, Windows, macOS, Linux, Android, iOS). TLS fingerprint, HTTP/2 settings and headers all match the choice. With browser support, a switch also renders JavaScript-built pages in Chromium.
 - **Options** also has **Check for missed files after downloading** (on by default). When a copy finishes, it checks every saved file is on disk and downloads again anything missing or that failed for a passing reason (timeouts, dropped connections, 5xx answers). It doesn't retry 404s. The summary says how many were recovered and how many are still missing.
+- **Retrying**: each file is retried on timeouts, dropped connections and 429/5xx answers. The number of tries and the first wait are in **Limits**. When a copy ends with failures, **Retry N failed** in the request bar fetches only those again, for example after fixing a proxy, a login or a limit.
 - **Limits**: max depth, max pages, stop after a size or a time, skip files over a size, a bandwidth limit, other names of the same site, sitemaps (on by default here), and assets from other sites.
 - **Auth**: Basic auth, extra headers (one per line) and a cookies file. These are used for the run only and never saved. In builds with browser support, **Log in with browser** opens Chromium at the site. You log in there and press **Done**; the session's cookies are then saved in the copy's state folder (owner-only, left out of zips) and used for the copy.
 - **Proxy**: a list of proxies (one per line; http, https, socks4, socks5 or socks5h, credentials as `user:pass@`), *Round-robin* or *Sticky per site* rotation, hosts that go direct, and a switch for the system proxy. **Test** fetches the site through each proxy and shows the status and time, or why it failed. The status bar shows whether copies go direct or through proxies.
@@ -146,7 +151,7 @@ Useful `copy` and `scan` options:
 | `--alias HOST` | Treat another host as part of the same site |
 | `--external-assets` | Also fetch images, CSS and scripts from other hosts |
 | `-j/--workers/--concurrency 4`, `--delay-ms 1000` | Parallel downloads, and the gap between two requests to one site |
-| `--retries 3`, `--timeout-secs 30` | Patience |
+| `--retries 3`, `--retry-delay-ms 1000`, `--timeout-secs 30` | Patience: retries per URL for timeouts, dropped connections and 429/5xx, the wait before the first one (each later one waits about twice as long; a server's Retry-After wins) |
 | `--sitemaps` | Also copy the pages listed in the site's sitemaps |
 | `--verify` | When done, check for missed files and download them again |
 | `--profile NAME`, `--platform OS` | Browser to impersonate (`mistercopy requesters profiles` lists them) and the platform it claims |

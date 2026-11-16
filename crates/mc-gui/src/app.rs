@@ -86,6 +86,8 @@ struct Fields {
     cookies: Entity<InputState>,
     proxies: Entity<TextareaState>,
     no_proxy: Entity<InputState>,
+    retries: Entity<InputState>,
+    retry_delay: Entity<InputState>,
 }
 
 /// The tabs of the result panel.
@@ -242,6 +244,11 @@ impl CopyWindow {
                 window,
                 cx,
             ),
+            retries: cx
+                .new(|cx| InputState::new(window, cx).default_value(defaults.retries.clone())),
+            retry_delay: cx.new(|cx| {
+                InputState::new(window, cx).default_value(defaults.retry_delay_secs.clone())
+            }),
         };
         Self {
             url,
@@ -479,6 +486,9 @@ impl CopyWindow {
             replay: self.replay,
             verify: self.verify,
             update,
+            retry_failed: false,
+            retries: text(&f.retries),
+            retry_delay_secs: text(&f.retry_delay),
         }
     }
 
@@ -559,10 +569,28 @@ impl CopyWindow {
     }
 
     fn start(&mut self, update: bool, cx: &mut Context<Self>) {
+        let settings = self.settings(update, cx);
+        self.start_with(settings, cx);
+    }
+
+    /// Fetches again what failed in the copy just made, without copying
+    /// the rest again.
+    pub fn retry_failed(&mut self, cx: &mut Context<Self>) {
+        let failed = self.progress.failed;
+        let mut settings = self.settings(false, cx);
+        settings.retry_failed = true;
+        self.start_with(settings, cx);
+        if self.progress.running() {
+            self.progress.note(&format!(
+                "Retrying {failed} failed files; the rest are kept."
+            ));
+        }
+    }
+
+    fn start_with(&mut self, settings: Settings, cx: &mut Context<Self>) {
         if self.progress.running() {
             return;
         }
-        let settings = self.settings(update, cx);
         let running = match job::start(&settings) {
             Ok(running) => running,
             Err(message) => {
@@ -1281,6 +1309,23 @@ impl CopyWindow {
                     .tooltip("Shrink to a mini window that shows the progress")
                     .on_click(cx.listener(|this, _, window, cx| this.show_mini(window, cx))),
             )
+            .when(
+                self.progress.failed > 0
+                    && matches!(
+                        self.progress.phase,
+                        job::Phase::Finished | job::Phase::Stopped
+                    ),
+                |el| {
+                    el.child(
+                        Button::new("retry-failed")
+                            .outline()
+                            .icon(IconName::RefreshCw)
+                            .label(format!("Retry {} failed", self.progress.failed))
+                            .tooltip("Fetch again only the files that failed; the rest are kept")
+                            .on_click(cx.listener(|this, _, _, cx| this.retry_failed(cx))),
+                    )
+                },
+            )
             .when(!running && self.can_update(), |el| {
                 el.child(
                     Button::new("update")
@@ -1519,12 +1564,23 @@ impl CopyWindow {
                     .child(cell("Stop after (minutes)", &f.max_time_min, "max-time"))
                     .child(cell("Bandwidth limit", &f.limit_rate, "limit-rate")),
             )
-            .child(labelled(
-                "Same site under other names",
-                None,
-                Input::new(&f.aliases).id("aliases").aria_label("Aliases"),
-                look,
-            ))
+            .child(
+                div()
+                    .flex()
+                    .gap_3()
+                    .child(cell("Retries per file", &f.retries, "retries"))
+                    .child(cell(
+                        "Wait before retrying (s)",
+                        &f.retry_delay,
+                        "retry-delay",
+                    ))
+                    .child(div().flex_1().min_w(px(150.)).child(labelled(
+                        "Same site under other names",
+                        None,
+                        Input::new(&f.aliases).id("aliases").aria_label("Aliases"),
+                        look,
+                    ))),
+            )
             .child(
                 div()
                     .flex()

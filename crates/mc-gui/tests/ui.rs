@@ -428,3 +428,75 @@ fn pauses_resumes_and_shrinks_to_a_mini_window(cx: &mut TestAppContext) {
     );
     assert!(progress.log.iter().any(|line| line.contains("Resumed")));
 }
+
+#[gpui_kit::test]
+fn retries_only_the_failed_files(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let server = runtime
+        .block_on(FixtureServer::start(Site::StaticBlog))
+        .unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let (handle, view) = open(cx, config.path());
+    let wait = |cx: &mut TestAppContext| {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while cx.update(|cx| view.read(cx).progress().running()) {
+            assert!(Instant::now() < deadline, "the copy didn't finish");
+            cx.run_until_parked();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        cx.run_until_parked();
+    };
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        let output = out.path().to_string_lossy().into_owned();
+        view.update(cx, |view, cx| {
+            view.speed = mc_gui::job::Speed::Fast;
+            view.output_input()
+                .clone()
+                .update(cx, |input, cx| input.set_value(output, window, cx));
+        });
+        window.render_frame(cx);
+        window.click("url", cx);
+        window.input(server.base_url().as_str(), cx);
+        // Every response is "too large": the start page fails.
+        window.click("robots", cx);
+        window.click("tab-limits", cx);
+        window.click("max-file", cx);
+        for _ in 0..3 {
+            window.press("backspace", cx);
+        }
+        window.input("0", cx);
+        window.click("copy", cx);
+    })
+    .unwrap();
+    wait(cx);
+    let failed = cx.update(|cx| view.read(cx).progress().failed);
+    assert!(failed > 0, "the start page should have failed");
+
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        let label = window
+            .find("retry-failed")
+            .label()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(label.contains(&format!("Retry {failed} failed")), "{label}");
+        // Lift the limit and retry only what failed.
+        window.click("max-file", cx);
+        window.press("backspace", cx);
+        window.input("512", cx);
+        window.click("retry-failed", cx);
+    })
+    .unwrap();
+    wait(cx);
+    let progress = cx.update(|cx| view.read(cx).progress().clone());
+    assert_eq!(progress.phase, Phase::Finished, "{}", progress.status());
+    assert_eq!(progress.failed, 0, "{:?}", progress.log);
+    assert!(
+        progress.saved >= 11,
+        "the retried start page led to the rest"
+    );
+    assert!(progress.log.iter().any(|line| line.contains("Retrying")));
+}

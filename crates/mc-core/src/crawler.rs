@@ -86,6 +86,9 @@ pub struct CrawlConfig {
     /// When the crawl finishes, check that every saved file is on disk and
     /// fetch again what is missing or failed for a passing reason.
     pub verify: bool,
+    /// When continuing a copy from its store, queue the URLs that failed
+    /// before (whatever the reason) to be fetched again.
+    pub retry_failed: bool,
 }
 
 impl CrawlConfig {
@@ -116,6 +119,7 @@ impl CrawlConfig {
             use_sitemaps: false,
             max_rate: None,
             verify: false,
+            retry_failed: false,
         }
     }
 }
@@ -566,6 +570,19 @@ impl Crawler {
                 }
                 state.count(None, &entry.state);
                 state.entries.insert(entry.url.clone(), entry);
+            }
+            if self.config.retry_failed {
+                let failed: Vec<UrlEntry> = state
+                    .entries
+                    .values()
+                    .filter(|entry| matches!(entry.state, EntryState::Failed(_)))
+                    .cloned()
+                    .collect();
+                for entry in failed {
+                    let job = self.job_from(&entry);
+                    state.record(job.entry(EntryState::Queued));
+                    state.queue.push_back(job);
+                }
             }
         }
         for seed in seeds {
