@@ -30,6 +30,8 @@ pub struct Prefs {
     pub script: Option<String>,
     /// A desktop notification when a copy finishes.
     pub notify: bool,
+    /// Play the finish sound when a copy finishes.
+    pub sound_on: bool,
     /// The log panel is open.
     pub console_open: bool,
     pub dark: bool,
@@ -51,6 +53,7 @@ impl Default for Prefs {
             script_on: false,
             script: None,
             notify: true,
+            sound_on: false,
             console_open: false,
             dark: true,
         }

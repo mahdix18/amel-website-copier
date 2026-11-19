@@ -150,6 +150,7 @@ pub struct CopyWindow {
     skip_types: Vec<FileType>,
     script_on: bool,
     notify: bool,
+    sound_on: bool,
     warc: bool,
     zip: bool,
     replay: bool,
@@ -328,6 +329,7 @@ impl CopyWindow {
             skip_types: prefs.skip_types.clone(),
             script_on: prefs.script_on,
             notify: prefs.notify,
+            sound_on: prefs.sound_on,
             warc: false,
             zip: false,
             replay: false,
@@ -381,11 +383,29 @@ impl CopyWindow {
             script_on: self.script_on,
             script: Some(self.fields.script.read(cx).value().to_string()),
             notify: self.notify,
+            sound_on: self.sound_on,
             console_open: self.console_open,
             dark: Look::global(cx).dark,
         };
         let _ = prefs.save(self.prefs_path.as_ref());
         cx.notify();
+    }
+
+    /// Plays the finish sound in the background; a problem (such as no
+    /// sound device) is reported in the log.
+    pub fn play_sound(&mut self, cx: &mut Context<Self>) {
+        let playing = cx
+            .background_executor()
+            .spawn(async move { crate::sound::play() });
+        cx.spawn(async move |this, cx| {
+            if let Err(error) = playing.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.console.push(console::Level::Warn, "app", error);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     /// Fills the form from the command line (`amel-gui URL
@@ -751,6 +771,9 @@ impl CopyWindow {
                 this.console.flush();
                 if this.notify {
                     notify_finished(&this.progress);
+                }
+                if this.sound_on {
+                    this.play_sound(cx);
                 }
                 if let Some(zip) = outcome.zip {
                     this.progress.zipped(zip);
@@ -1731,6 +1754,15 @@ impl CopyWindow {
                     .label("Notify me when a copy finishes")
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.notify = *checked;
+                        this.changed(cx);
+                    })),
+            )
+            .child(
+                Checkbox::new("sound-on")
+                    .checked(self.sound_on)
+                    .label("Play a sound when a copy finishes")
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.sound_on = *checked;
                         this.changed(cx);
                     })),
             )

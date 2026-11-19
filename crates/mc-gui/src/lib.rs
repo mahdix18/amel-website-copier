@@ -13,6 +13,7 @@ pub mod mini;
 pub mod palette;
 pub mod prefs;
 pub mod projects;
+pub mod sound;
 
 pub use app::{CopyWindow, bind_keys};
 

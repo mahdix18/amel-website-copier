@@ -709,3 +709,19 @@ fn ctrl_space_shows_script_suggestions(cx: &mut TestAppContext) {
     assert!(labels.contains(&"onStart".to_owned()), "{labels:?}");
     assert!(labels.contains(&"log".to_owned()), "{labels:?}");
 }
+
+#[gpui_kit::test]
+fn the_finish_sound_is_one_checkbox(cx: &mut TestAppContext) {
+    let config = tempfile::tempdir().unwrap();
+    let (handle, _) = open(cx, config.path());
+    cx.update_window(handle.into(), |_, window, cx| {
+        window.render_frame(cx);
+        window.click("sound-on", cx);
+        window.render_frame(cx);
+    })
+    .unwrap();
+    cx.run_until_parked();
+    let prefs = std::fs::read_to_string(config.path().join("prefs.json")).unwrap();
+    let prefs: serde_json::Value = serde_json::from_str(&prefs).unwrap();
+    assert_eq!(prefs["sound_on"], true, "{prefs}");
+}

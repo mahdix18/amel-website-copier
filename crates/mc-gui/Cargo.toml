@@ -24,6 +24,7 @@ mc-requester-playwright = { workspace = true, optional = true }
 mc-requester-wreq.workspace = true
 mc-script.workspace = true
 notify-rust = "4.17"
+rodio = { version = "0.23", default-features = false, features = ["playback", "mp3", "wav", "vorbis", "flac"] }
 anyhow.workspace = true
 lsp-types = "0.97"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
