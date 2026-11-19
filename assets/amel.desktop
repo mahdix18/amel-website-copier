@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Amel Website Copier
+GenericName=Website Copier
+Comment=Copy websites for offline browsing
+Exec=amel-gui %U
+Icon=amel
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=website;copy;offline;mirror;crawler;
+StartupWMClass=amel

@@ -461,6 +461,13 @@ Amel does not solve CAPTCHAs or interactive challenges, and the docs say users s
   - Ctrl+Space opens the suggestions (gpui-kit binds no key for it); with nothing typed they list every hook and keyword.
 - **Docs and screenshots (2026-11-16):** the README has a screenshot of a copy in progress and a gallery of every tab, the log panel, the script editor and the mini window, all retaken after the rename. The crate table lists `mc-script`.
 
+- **Release workflow for every platform (2026-11-19):**
+  - `release.yml` builds six targets, each lean and `-browser`: Linux x86-64 and ARM64 (on Ubuntu 22.04 for an older glibc), macOS Apple Silicon and Intel (the Intel build is made on the Apple Silicon runner), Windows x86-64, and Windows ARM64 (marked experimental, so a failure there doesn't block a release).
+  - A tag must match the version in `Cargo.toml`. Publishing checks the five main targets are all there, adds `SHA256SUMS`, and uses `.github/release-notes.md` for install notes. Tags with a dash are pre-releases. Running the workflow by hand builds the packages as artifacts without publishing.
+  - `scripts/package.sh` takes `TARGET`, and besides the archive makes a `.deb` (with a menu entry and icon) on Linux and a `.dmg` with `Amel Website Copier.app` (ad-hoc signed, with an `.icns` made from `assets/icon.png`) on macOS.
+  - The app has an icon (`assets/icon.png`) and a desktop entry, and Windows release builds open no console window.
+  - Not done: code signing and notarization (Apple Developer ID, Windows Authenticode), a Windows installer (MSI) and an icon in the .exe, AppImage/Flatpak, Homebrew/Scoop/winget.
+
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.
 - **Playwright from Rust** still needs the Playwright driver plus Chromium (about 150 MB+ downloaded on demand). If that proves painful, `chromiumoxide` (pure-Rust CDP) is the drop-in alternative requester. The trait makes the swap cheap.

@@ -8,14 +8,43 @@ A lightweight website copier for offline browsing, written in Rust. See [PLAN.md
 
 ## Install
 
-Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. Each one has packages for Linux, macOS and Windows, with and without browser support, plus checksums. To build one for your own machine:
+Download a package from the [releases page](https://github.com/mahdix18/amel-website-copier/releases):
+
+| Platform | Package |
+|---|---|
+| Windows (x86-64, ARM64) | `.zip`: unzip and run `amel-gui.exe` |
+| macOS (Apple Silicon and Intel) | `.dmg`: drag **Amel Website Copier** to Applications |
+| Debian, Ubuntu (x86-64, ARM64) | `.deb`: `sudo apt install ./amel-….deb` |
+| Other Linux | `.tar.gz`: unpack and run `./amel-gui` |
+
+Each comes in a lean build and a `-browser` build that can also render JavaScript-built pages in Chromium. Every package has both the desktop app (`amel-gui`) and the command-line tool (`amel`). The builds aren't signed yet: on macOS, run `xattr -dr com.apple.quarantine "/Applications/Amel Website Copier.app"` if the app is reported as damaged; on Windows, choose **More info → Run anyway** if SmartScreen asks.
+
+### Making a release
+
+Releases are built by `.github/workflows/release.yml`. Set the version in `Cargo.toml`, commit, then push a matching tag:
 
 ```bash
-scripts/package.sh                   # dist/amel-<version>-<target>.tar.gz
+git tag v0.2.0
+```
+
+```bash
+git push origin v0.2.0
+```
+
+The workflow checks that the tag matches the version, builds Linux, macOS and Windows packages for x86-64 and ARM64 (lean and `-browser`), and publishes them as a GitHub release with a `SHA256SUMS` file. A tag with a dash, such as `v0.2.0-beta.1`, makes a pre-release. To try the builds without publishing, run the workflow by hand from the Actions tab; the packages are kept as artifacts.
+
+To build packages for your own machine (a `.tar.gz` plus a `.deb` on Linux or a `.dmg` on macOS):
+
+```bash
+scripts/package.sh
 ```
 
 ```bash
 FEATURES=browser scripts/package.sh  # with Chromium rendering
+```
+
+```bash
+TARGET=x86_64-apple-darwin scripts/package.sh  # another target, if its Rust target is installed
 ```
 
 Or run the command-line tool in Docker:

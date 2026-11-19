@@ -1,3 +1,6 @@
+// Release builds on Windows open no console window next to the app.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use gpui_kit::component::TitleBar;
 use gpui_kit::{
     AppContext, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions, px, size,

@@ -1,56 +1,134 @@
 name: Release
 
-# Pushing a tag such as v0.2.0 builds packages for Linux, macOS and Windows
-# with scripts/package.sh and publishes them, with checksums, as a GitHub
-# release.
+# Pushing a tag such as v0.2.0 builds packages for every platform with
+# scripts/package.sh and publishes them, with checksums, as a GitHub
+# release. Running the workflow by hand (Actions → Release → Run workflow)
+# builds the same packages as artifacts without publishing anything.
+#
+# Each target is built twice: lean, and with Chromium rendering (browser).
+#
+#   Linux x86-64 and ARM64    .tar.gz and .deb
+#   macOS Apple Silicon/Intel .tar.gz and .dmg (the .app)
+#   Windows x86-64 and ARM64  .zip
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  # The app runs on macOS 11 and later.
+  MACOSX_DEPLOYMENT_TARGET: "11.0"
+
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag matches the version in Cargo.toml
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
   package:
-    name: package (${{ matrix.os }})
+    name: package (${{ matrix.target }})
+    needs: check
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          # 22.04 keeps the glibc requirement low, so the Linux builds run
+          # on older distributions too.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          # Built on the Apple Silicon runner for Intel Macs.
+          - os: macos-14
+            target: x86_64-apple-darwin
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          # GitHub's Windows ARM runners are newer; a failure here doesn't
+          # hold back the other platforms.
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            experimental: true
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - uses: actions/checkout@v4
-      # The version comes from rust-toolchain.toml.
       - uses: dtolnay/rust-toolchain@stable
-      - if: runner.os == 'Windows'
+      # The version comes from rust-toolchain.toml; add the target to it.
+      - name: Rust target
+        shell: bash
+        run: rustup target add ${{ matrix.target }}
+      # wreq builds BoringSSL: cmake and libclang, and NASM for the x86-64
+      # assembly on Windows.
+      - if: matrix.target == 'x86_64-pc-windows-msvc'
         uses: ilammy/setup-nasm@v1
+      # GPUI (the desktop app) on Linux links against X11, Wayland and Vulkan.
       - if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
+          sudo apt-get install -y cmake clang libclang-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
             libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev libasound2-dev
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
       - name: Package
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           scripts/package.sh
           FEATURES=browser scripts/package.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.os }}
+          name: dist-${{ matrix.target }}
           path: dist/*
+          if-no-files-found: error
 
   publish:
     needs: package
+    # Only for tags, and even if the experimental target failed.
+    if: ${{ !cancelled() && github.ref_type == 'tag' && needs.package.result != 'skipped' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: dist-*
           merge-multiple: true
+      - name: Check the main platforms are all there
+        run: |
+          missing=0
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+                        aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msvc; do
+            if ! ls dist/amel-*-"$target".* >/dev/null 2>&1; then
+              echo "::error::no package for $target"
+              missing=1
+            fi
+          done
+          exit $missing
+      - name: One checksum file for everything
+        run: cd dist && cat *.sha256 > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: .github/release-notes.md
           generate_release_notes: true
+          # v1.0.0-beta.1 and the like are marked as pre-releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
