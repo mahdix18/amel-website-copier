@@ -772,7 +772,8 @@ impl CopyWindow {
                 if this.notify {
                     notify_finished(&this.progress);
                 }
-                if this.sound_on {
+                // Only a copy that ran to the end, not one stopped or failed.
+                if this.sound_on && this.progress.phase == job::Phase::Finished {
                     this.play_sound(cx);
                 }
                 if let Some(zip) = outcome.zip {
