@@ -4831,7 +4831,7 @@ dependencies = [
 
 [[package]]
 name = "mc-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "chrono",
@@ -4857,7 +4857,7 @@ dependencies = [
 
 [[package]]
 name = "mc-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.23.1",
  "flate2",
@@ -4879,7 +4879,7 @@ dependencies = [
 
 [[package]]
 name = "mc-extract"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "encoding_rs",
  "lol_html",
@@ -4889,7 +4889,7 @@ dependencies = [
 
 [[package]]
 name = "mc-fixtures"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4904,7 +4904,7 @@ dependencies = [
 
 [[package]]
 name = "mc-gui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4929,7 +4929,7 @@ dependencies = [
 
 [[package]]
 name = "mc-requester"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4946,7 +4946,7 @@ dependencies = [
 
 [[package]]
 name = "mc-requester-playwright"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mc-fixtures",
  "mc-requester",
@@ -4958,7 +4958,7 @@ dependencies = [
 
 [[package]]
 name = "mc-requester-wreq"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-util",
  "mc-fixtures",
@@ -4973,7 +4973,7 @@ dependencies = [
 
 [[package]]
 name = "mc-script"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mc-core",
  "rquickjs",
@@ -4983,7 +4983,7 @@ dependencies = [
 
 [[package]]
 name = "mc-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mc-core",
  "mc-requester",
