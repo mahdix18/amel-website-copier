@@ -49,6 +49,8 @@ pub const LINK_MAP_SVG: &str = "amel-linkmap.svg";
 actions!(amel, [TogglePalette, ToggleConsole]);
 
 /// The log panel's height, and the lines it draws at most.
+/// The faint cat in the window's corner.
+const WATERMARK_SIZE: f32 = 300.;
 /// The progress panel's smallest height.
 const RESULT_MIN_HEIGHT: f32 = 360.;
 /// The script editor's height.
@@ -3477,6 +3479,7 @@ impl Render for CopyWindow {
             .child(header)
             .child(
                 div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
                     .flex()
@@ -3511,12 +3514,35 @@ impl Render for CopyWindow {
                                     .child(div().id("tab-body").child(view)),
                             )
                             .child(result),
+                    )
+                    // Amel's cat watches from the corner: it stays put while
+                    // the column scrolls, and clicks go through to what's under it.
+                    .child(
+                        img(watermark())
+                            .absolute()
+                            .right(px(26.))
+                            .bottom(px(10.))
+                            .size(px(WATERMARK_SIZE))
+                            .opacity(if look.dark { 0.12 } else { 0.10 }),
                     ),
             )
             .children(console_panel)
             .child(status_bar)
             .children(palette)
     }
+}
+
+/// The cat in the window's corner, `assets/watermark.png`.
+fn watermark() -> Arc<gpui_kit::Image> {
+    static WATERMARK: std::sync::OnceLock<Arc<gpui_kit::Image>> = std::sync::OnceLock::new();
+    WATERMARK
+        .get_or_init(|| {
+            Arc::new(gpui_kit::Image::from_bytes(
+                gpui_kit::ImageFormat::Png,
+                include_bytes!("../../../assets/watermark.png").to_vec(),
+            ))
+        })
+        .clone()
 }
 
 /// The app's cat, `assets/logo.png` (made by `scripts/icons.py`).
