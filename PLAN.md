@@ -466,11 +466,12 @@ Amel does not solve CAPTCHAs or interactive challenges, and the docs say users s
   - A tag must match the version in `Cargo.toml`. Publishing checks the five main targets are all there, adds `SHA256SUMS`, and uses `.github/release-notes.md` for install notes. Tags with a dash are pre-releases. Running the workflow by hand builds the packages as artifacts without publishing.
   - `scripts/package.sh` takes `TARGET`, and besides the archive makes a `.deb` (with a menu entry and icon) on Linux and a `.dmg` with `Amel Website Copier.app` (ad-hoc signed, with an `.icns` made from `assets/icon.png`) on macOS.
   - The app has an icon (`assets/icon.png`) and a desktop entry, and Windows release builds open no console window.
-  - Not done: code signing and notarization (Apple Developer ID, Windows Authenticode), a Windows installer (MSI) and an icon in the .exe, AppImage/Flatpak, Homebrew/Scoop/winget.
+  - Not done: code signing and notarization (Apple Developer ID, Windows Authenticode), a Windows installer (MSI), AppImage/Flatpak, Homebrew/Scoop/winget.
 
 - **Finish sound (2026-11-19):** a checkbox in Options plays `assets/sounds/finish.mp3`, built into the app with `include_bytes!`, when a copy runs to the end; stopped and failed copies stay silent (rodio 0.23). No sound device is reported in the log, not as an error.
 - **Windows ARM64 releases:** GitHub's ARM runner builds with Visual Studio's x64-hosted cross compiler, so CMake reported an AMD64 processor and BoringSSL added x86-64 assembly. `scripts/cmake/windows-arm64.cmake` (set through `CMAKE_TOOLCHAIN_FILE_aarch64_pc_windows_msvc`) declares ARM64 and builds BoringSSL without assembly. macOS jobs moved to `macos-15` after `macos-14` was retired.
 
+- **Logo (2026-11-21):** a fluffy kawaii black cat sticker. `assets/icon.png` (1024 px) is the source: it is the README image, the Linux menu icon and the macOS `.icns`; `scripts/icons.py` makes `icon.ico` (16–256 px) and the 96 px title-bar `logo.png` from it. Windows builds embed `icon.ico` in `amel-gui.exe` and `amel.exe` as resource 1 (`build.rs` with winresource), which gpui also uses for the window and taskbar icon.
 ## 10. Risks & open questions
 - **Dependency churn:** wreq's versioning has jumped around (5.x → 6.0-rc → 0.1x), playwright-rs is pre-1.0 and GPUI is pre-1.0 too. Mitigations: exact version pins, each kept behind our own crate boundary, and Renovate PRs gated by the fixture suite.
 - **Playwright from Rust** still needs the Playwright driver plus Chromium (about 150 MB+ downloaded on demand). If that proves painful, `chromiumoxide` (pure-Rust CDP) is the drop-in alternative requester. The trait makes the swap cheap.

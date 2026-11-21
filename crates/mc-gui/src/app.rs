@@ -17,11 +17,12 @@ use gpui_kit::component::{Disableable, Icon, IconName, Selectable, Sizable, Titl
 use gpui_kit::prelude::*;
 use gpui_kit::{
     AnyElement, AnyWindowHandle, App, Context, Entity, FocusHandle, Focusable, FontWeight, Hsla,
-    KeyBinding, KeyDownEvent, Role, SharedString, TestSupportExt, Window, actions, div, px,
+    KeyBinding, KeyDownEvent, Role, SharedString, TestSupportExt, Window, actions, div, img, px,
     relative,
 };
 use mc_core::{FileType, StopHandle, human_bytes};
 use mc_requester::ProxyRotation;
+use std::sync::Arc;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::oneshot;
 
@@ -980,19 +981,7 @@ impl CopyWindow {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .size(px(24.))
-                            .rounded_md()
-                            .bg(look.accent)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_color(look.on_accent)
-                            .text_sm()
-                            .font_weight(FontWeight::BOLD)
-                            .child("A"),
-                    )
+                    .child(img(logo()).id("app-logo").size(px(28.)))
                     .child(
                         div()
                             .text_sm()
@@ -3528,6 +3517,18 @@ impl Render for CopyWindow {
             .child(status_bar)
             .children(palette)
     }
+}
+
+/// The app's cat, `assets/logo.png` (made by `scripts/icons.py`).
+fn logo() -> Arc<gpui_kit::Image> {
+    static LOGO: std::sync::OnceLock<Arc<gpui_kit::Image>> = std::sync::OnceLock::new();
+    LOGO.get_or_init(|| {
+        Arc::new(gpui_kit::Image::from_bytes(
+            gpui_kit::ImageFormat::Png,
+            include_bytes!("../../../assets/logo.png").to_vec(),
+        ))
+    })
+    .clone()
 }
 
 /// The phase as a colour and a word, for chips and the status bar.

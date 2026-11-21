@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.png" alt="Amel's cat" width="128"></p>
+
 # Amel Website Copier
 
 A lightweight website copier for offline browsing, written in Rust. See [PLAN.md](PLAN.md) for the design and milestones.
